@@ -305,7 +305,8 @@ const Martingale = () => {
               </div>
               <div className="mt-4 flex items-center gap-4 text-xs text-muted-foreground">
                 <span>Round {activeTrade.round}</span>
-                <span>Qty: {activeTrade.lots * 75}</span>
+                <span>Qty: {activeTrade.lots * 65}</span>
+                <span>Capital: ₹{(activeTrade.lots * 65 * Number(activeTrade.entry_price)).toFixed(0)}</span>
                 <span>Entered: {new Date(activeTrade.entry_time).toLocaleTimeString('en-IN')}</span>
               </div>
               {/* P&L Bar */}
