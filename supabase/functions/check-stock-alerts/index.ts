@@ -529,6 +529,12 @@ serve(async (req) => {
             const ocData = await ocRes.json();
             const options = ocData?.data || [];
             console.log(`Upstox option chain: ${options.length} entries for expiry ${expiry.iso}`);
+            
+            // Log raw response status for debugging
+            if (options.length === 0) {
+              console.log(`Upstox raw response status: ${ocData?.status}, keys: ${JSON.stringify(Object.keys(ocData || {}))}`);
+              console.log(`Upstox raw data sample: ${JSON.stringify(ocData).substring(0, 500)}`);
+            }
 
             for (const entry of options) {
               const strikePrice = entry.strike_price;
@@ -555,11 +561,18 @@ serve(async (req) => {
             console.error(`Upstox option chain failed (${ocRes.status}): ${errText.substring(0, 200)}`);
           }
 
-          return new Response(JSON.stringify({
-            success: true,
-            niftySpot, atmStrike, otmCEStrike, otmPEStrike, otmCEPrice, otmPEPrice, strikeDiff,
-            specificPrice, expiry: expiry.display, source: 'upstox',
-          }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+          // If Upstox returned valid prices, use them. Otherwise fall through to NSE fallback.
+          const hasValidPrices = otmCEPrice > 0 || otmPEPrice > 0 || specificPrice !== null;
+          if (hasValidPrices) {
+            return new Response(JSON.stringify({
+              success: true,
+              niftySpot, atmStrike, otmCEStrike, otmPEStrike, otmCEPrice, otmPEPrice, strikeDiff,
+              specificPrice, expiry: expiry.display, source: 'upstox',
+            }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+          }
+          
+          console.log('Upstox returned 0 prices, falling back to NSE estimates');
+          // Fall through to NSE fallback below
         } catch (upstoxErr) {
           console.error('Upstox API error, falling back to NSE:', upstoxErr);
           // Fall through to NSE fallback below
