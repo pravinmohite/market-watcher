@@ -352,7 +352,7 @@ const Martingale = () => {
               <p>🔄 Auto-restarts after profit or max rounds</p>
               <p>🕒 Auto square-off at <strong className="text-foreground">3:29 PM</strong></p>
               <p>📊 Paper trading only — no real orders</p>
-              <p>⚙️ Lot size: 75 (Nifty) • Weekly expiry</p>
+              <p>⚙️ Lot size: 65 (Nifty) • Weekly expiry</p>
             </div>
           </div>
         </section>
