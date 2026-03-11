@@ -373,8 +373,10 @@ const Martingale = () => {
                     <th className="text-left p-3 text-muted-foreground font-medium">Time</th>
                     <th className="text-left p-3 text-muted-foreground font-medium">Round</th>
                     <th className="text-left p-3 text-muted-foreground font-medium">Option</th>
-                    <th className="text-right p-3 text-muted-foreground font-medium">Lots</th>
-                    <th className="text-right p-3 text-muted-foreground font-medium">Entry</th>
+                     <th className="text-right p-3 text-muted-foreground font-medium">Lots</th>
+                     <th className="text-right p-3 text-muted-foreground font-medium">Qty</th>
+                     <th className="text-right p-3 text-muted-foreground font-medium">Capital</th>
+                     <th className="text-right p-3 text-muted-foreground font-medium">Entry</th>
                     <th className="text-right p-3 text-muted-foreground font-medium">Exit</th>
                     <th className="text-right p-3 text-muted-foreground font-medium">P&L</th>
                     <th className="text-left p-3 text-muted-foreground font-medium">Status</th>
