@@ -1,0 +1,355 @@
+import { useState } from "react";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { supabase } from "@/integrations/supabase/client";
+import { Play, Square, RefreshCw, Zap, TrendingUp, TrendingDown, ArrowLeftRight, AlertTriangle, DollarSign, Activity, ArrowLeft } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { toast } from "sonner";
+import { cn } from "@/lib/utils";
+import { Link } from "react-router-dom";
+
+const Martingale = () => {
+  const queryClient = useQueryClient();
+
+  const { data, isLoading, refetch } = useQuery({
+    queryKey: ["martingale-status"],
+    queryFn: async () => {
+      const { data, error } = await supabase.functions.invoke("martingale-bot", {
+        body: { action: "status" },
+      });
+      if (error) throw error;
+      return data;
+    },
+    refetchInterval: 15000,
+  });
+
+  const startBot = useMutation({
+    mutationFn: async () => {
+      const { data, error } = await supabase.functions.invoke("martingale-bot", {
+        body: { action: "start" },
+      });
+      if (error) throw error;
+      return data;
+    },
+    onSuccess: (data) => {
+      toast.success(data.message || "Bot started!");
+      queryClient.invalidateQueries({ queryKey: ["martingale-status"] });
+    },
+    onError: () => toast.error("Failed to start bot"),
+  });
+
+  const stopBot = useMutation({
+    mutationFn: async () => {
+      const { data, error } = await supabase.functions.invoke("martingale-bot", {
+        body: { action: "stop" },
+      });
+      if (error) throw error;
+      return data;
+    },
+    onSuccess: () => {
+      toast.info("Bot stopped");
+      queryClient.invalidateQueries({ queryKey: ["martingale-status"] });
+    },
+    onError: () => toast.error("Failed to stop bot"),
+  });
+
+  const tickBot = useMutation({
+    mutationFn: async () => {
+      const { data, error } = await supabase.functions.invoke("martingale-bot", {
+        body: { action: "tick" },
+      });
+      if (error) throw error;
+      return data;
+    },
+    onSuccess: (data) => {
+      toast.info(data.action || data.message || "Tick complete");
+      queryClient.invalidateQueries({ queryKey: ["martingale-status"] });
+    },
+    onError: () => toast.error("Tick failed"),
+  });
+
+  const activeSession = data?.active_session;
+  const activeTrade = data?.active_trade;
+  const currentPrice = data?.current_price;
+  const currentPnl = data?.current_pnl_percent;
+  const optionData = data?.option_data;
+  const recentSessions = data?.recent_sessions || [];
+  const allTrades = data?.all_trades || [];
+  const isActive = activeSession?.status === 'active';
+
+  return (
+    <div className="min-h-screen bg-background">
+      {/* Header */}
+      <header className="border-b border-border sticky top-0 z-10 bg-background/80 backdrop-blur-xl">
+        <div className="container mx-auto px-4 py-4 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <Link to="/" className="text-muted-foreground hover:text-foreground transition-colors">
+              <ArrowLeft className="w-5 h-5" />
+            </Link>
+            <div className="w-10 h-10 rounded-xl bg-primary/15 flex items-center justify-center">
+              <Zap className="w-5 h-5 text-primary" />
+            </div>
+            <div>
+              <h1 className="text-lg font-bold text-foreground tracking-tight">Martingale Bot</h1>
+              <p className="text-xs text-muted-foreground">Paper Trading • Nifty Options • Doubling Strategy</p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            {isActive ? (
+              <>
+                <Button onClick={() => tickBot.mutate()} disabled={tickBot.isPending} variant="outline" size="sm" className="gap-1.5">
+                  <RefreshCw className={cn("w-3.5 h-3.5", tickBot.isPending && "animate-spin")} />
+                  Tick
+                </Button>
+                <Button onClick={() => stopBot.mutate()} disabled={stopBot.isPending} variant="destructive" size="sm" className="gap-1.5">
+                  <Square className="w-3.5 h-3.5" />
+                  Stop
+                </Button>
+              </>
+            ) : (
+              <Button onClick={() => startBot.mutate()} disabled={startBot.isPending} size="sm" className="gap-1.5">
+                <Play className="w-3.5 h-3.5" />
+                {startBot.isPending ? "Starting..." : "Start Bot"}
+              </Button>
+            )}
+          </div>
+        </div>
+      </header>
+
+      <main className="container mx-auto px-4 py-6 space-y-6">
+        {/* Status Banner */}
+        <div className={cn(
+          "rounded-xl border p-4",
+          isActive ? "border-primary/30 bg-primary/5" : "border-border bg-card"
+        )}>
+          <div className="flex items-center gap-3">
+            <div className={cn(
+              "w-3 h-3 rounded-full",
+              isActive ? "bg-gain animate-pulse" : "bg-muted-foreground"
+            )} />
+            <span className="text-sm font-medium text-foreground">
+              {isActive ? "Bot Running" : "Bot Stopped"}
+            </span>
+            {isActive && activeSession && (
+              <span className="text-xs text-muted-foreground">
+                • Round {activeSession.current_round}/{activeSession.max_rounds}
+                • Session P&L: <span className={cn("font-mono font-medium", activeSession.total_pnl >= 0 ? "text-gain" : "text-loss")}>
+                  ₹{Number(activeSession.total_pnl).toFixed(0)}
+                </span>
+              </span>
+            )}
+          </div>
+        </div>
+
+        {/* Market Data */}
+        {optionData && (
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <MartingaleStatCard icon={<Activity className="w-4 h-4" />} label="Nifty Spot" value={`₹${optionData.niftySpot?.toFixed(0)}`} />
+            <MartingaleStatCard icon={<TrendingUp className="w-4 h-4" />} label="OTM CE" value={`${optionData.otmCEStrike} @ ₹${optionData.otmCEPrice?.toFixed(1)}`} />
+            <MartingaleStatCard icon={<TrendingDown className="w-4 h-4" />} label="OTM PE" value={`${optionData.otmPEStrike} @ ₹${optionData.otmPEPrice?.toFixed(1)}`} />
+            <MartingaleStatCard icon={<ArrowLeftRight className="w-4 h-4" />} label="ATM Strike" value={optionData.atmStrike?.toString()} />
+          </div>
+        )}
+
+        {/* Active Trade */}
+        {activeTrade && (
+          <section>
+            <h2 className="text-base font-semibold text-foreground mb-3 flex items-center gap-2">
+              <DollarSign className="w-4 h-4 text-primary" />
+              Active Position
+            </h2>
+            <div className="rounded-xl border border-primary/30 bg-card p-5">
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                <div>
+                  <p className="text-xs text-muted-foreground mb-1">Option</p>
+                  <p className="text-lg font-bold font-mono text-foreground">
+                    {activeTrade.strike_price} {activeTrade.option_type}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-xs text-muted-foreground mb-1">Lots</p>
+                  <p className="text-lg font-bold font-mono text-foreground">{activeTrade.lots}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-muted-foreground mb-1">Entry → Current</p>
+                  <p className="text-lg font-bold font-mono text-foreground">
+                    ₹{Number(activeTrade.entry_price).toFixed(1)} → {currentPrice !== null ? `₹${currentPrice.toFixed(1)}` : '...'}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-xs text-muted-foreground mb-1">P&L</p>
+                  {currentPnl !== null ? (
+                    <p className={cn("text-lg font-bold font-mono", currentPnl >= 0 ? "text-gain" : "text-loss")}>
+                      {currentPnl >= 0 ? "+" : ""}{currentPnl.toFixed(2)}%
+                    </p>
+                  ) : (
+                    <p className="text-lg font-bold font-mono text-muted-foreground">--</p>
+                  )}
+                </div>
+              </div>
+              <div className="mt-4 flex items-center gap-4 text-xs text-muted-foreground">
+                <span>Round {activeTrade.round}</span>
+                <span>Qty: {activeTrade.lots * 75}</span>
+                <span>Entered: {new Date(activeTrade.entry_time).toLocaleTimeString('en-IN')}</span>
+              </div>
+              {/* P&L Bar */}
+              {currentPnl !== null && (
+                <div className="mt-3">
+                  <div className="flex justify-between text-xs text-muted-foreground mb-1">
+                    <span>-15% (Exit)</span>
+                    <span>0%</span>
+                    <span>+20% (Target)</span>
+                  </div>
+                  <div className="h-2 bg-muted rounded-full relative overflow-hidden">
+                    <div
+                      className={cn("absolute h-full rounded-full transition-all", currentPnl >= 0 ? "bg-gain" : "bg-loss")}
+                      style={{
+                        left: currentPnl >= 0 ? '42.8%' : `${Math.max(0, 42.8 + (currentPnl / 15) * 42.8)}%`,
+                        width: currentPnl >= 0
+                          ? `${Math.min((currentPnl / 20) * 57.2, 57.2)}%`
+                          : `${Math.min(Math.abs(currentPnl / 15) * 42.8, 42.8)}%`,
+                      }}
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+          </section>
+        )}
+
+        {/* Strategy Explanation */}
+        <section className="rounded-xl border border-border bg-card p-5">
+          <h2 className="text-base font-semibold text-foreground mb-3 flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 text-warning" />
+            Strategy Rules
+          </h2>
+          <div className="grid md:grid-cols-2 gap-3 text-sm text-muted-foreground">
+            <div className="space-y-2">
+              <p>1️⃣ Buy <strong className="text-foreground">1 lot OTM CE</strong></p>
+              <p>2️⃣ If <span className="text-loss font-medium">-15%</span> → exit, buy <strong className="text-foreground">2 lots OTM PE</strong></p>
+              <p>3️⃣ If <span className="text-loss font-medium">-15%</span> → exit, buy <strong className="text-foreground">4 lots OTM CE</strong></p>
+              <p>4️⃣ Continue flipping & doubling (max 5 rounds)</p>
+            </div>
+            <div className="space-y-2">
+              <p>🎯 <span className="text-gain font-medium">+20%</span> profit → exit & restart fresh</p>
+              <p>🔄 Auto-restarts after profit or max rounds</p>
+              <p>📊 Paper trading only — no real orders</p>
+              <p>⚙️ Lot size: 75 (Nifty)</p>
+            </div>
+          </div>
+        </section>
+
+        {/* Trade History */}
+        <section>
+          <h2 className="text-base font-semibold text-foreground mb-3 flex items-center gap-2">
+            <Activity className="w-4 h-4 text-primary" />
+            Trade History
+          </h2>
+          {allTrades.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No trades yet. Start the bot to begin.</p>
+          ) : (
+            <div className="overflow-x-auto rounded-xl border border-border">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-border bg-muted/50">
+                    <th className="text-left p-3 text-muted-foreground font-medium">Time</th>
+                    <th className="text-left p-3 text-muted-foreground font-medium">Round</th>
+                    <th className="text-left p-3 text-muted-foreground font-medium">Option</th>
+                    <th className="text-right p-3 text-muted-foreground font-medium">Lots</th>
+                    <th className="text-right p-3 text-muted-foreground font-medium">Entry</th>
+                    <th className="text-right p-3 text-muted-foreground font-medium">Exit</th>
+                    <th className="text-right p-3 text-muted-foreground font-medium">P&L</th>
+                    <th className="text-left p-3 text-muted-foreground font-medium">Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {allTrades.map((trade: any) => (
+                    <tr key={trade.id} className="border-b border-border/50 hover:bg-muted/30 transition-colors">
+                      <td className="p-3 text-xs font-mono text-muted-foreground">
+                        {new Date(trade.entry_time).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}
+                      </td>
+                      <td className="p-3 font-mono text-foreground">R{trade.round}</td>
+                      <td className="p-3 font-mono text-foreground">
+                        <span className={cn(
+                          "px-1.5 py-0.5 rounded text-xs font-medium",
+                          trade.option_type === 'CE' ? "bg-gain/15 text-gain" : "bg-loss/15 text-loss"
+                        )}>
+                          {trade.strike_price} {trade.option_type}
+                        </span>
+                      </td>
+                      <td className="p-3 text-right font-mono text-foreground">{trade.lots}</td>
+                      <td className="p-3 text-right font-mono text-foreground">₹{Number(trade.entry_price).toFixed(1)}</td>
+                      <td className="p-3 text-right font-mono text-foreground">
+                        {trade.exit_price ? `₹${Number(trade.exit_price).toFixed(1)}` : '—'}
+                      </td>
+                      <td className={cn("p-3 text-right font-mono font-medium",
+                        trade.pnl > 0 ? "text-gain" : trade.pnl < 0 ? "text-loss" : "text-muted-foreground"
+                      )}>
+                        {trade.pnl !== null ? `₹${Number(trade.pnl).toFixed(0)}` : '—'}
+                      </td>
+                      <td className="p-3">
+                        <span className={cn(
+                          "px-2 py-0.5 rounded-full text-xs font-medium",
+                          trade.status === 'open' ? "bg-primary/15 text-primary" : "bg-muted text-muted-foreground"
+                        )}>
+                          {trade.status}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+
+        {/* Session History */}
+        {recentSessions.length > 0 && (
+          <section>
+            <h2 className="text-base font-semibold text-foreground mb-3">Session History</h2>
+            <div className="grid gap-2">
+              {recentSessions.map((session: any) => (
+                <div key={session.id} className="rounded-lg border border-border bg-card p-3 flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <span className={cn(
+                      "px-2 py-0.5 rounded-full text-xs font-medium",
+                      session.status === 'active' ? "bg-primary/15 text-primary" :
+                      session.status === 'completed' ? "bg-gain/15 text-gain" :
+                      "bg-muted text-muted-foreground"
+                    )}>
+                      {session.status}
+                    </span>
+                    <span className="text-xs text-muted-foreground">
+                      Rounds: {session.current_round}/{session.max_rounds}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <span className={cn("font-mono font-medium text-sm",
+                      session.total_pnl >= 0 ? "text-gain" : "text-loss"
+                    )}>
+                      ₹{Number(session.total_pnl).toFixed(0)}
+                    </span>
+                    <span className="text-xs text-muted-foreground">
+                      {new Date(session.created_at).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+      </main>
+    </div>
+  );
+};
+
+const MartingaleStatCard = ({ icon, label, value }: { icon: React.ReactNode; label: string; value: string }) => (
+  <div className="rounded-xl border border-border p-3 bg-card">
+    <div className="flex items-center gap-1.5 text-muted-foreground mb-1">
+      {icon}
+      <span className="text-xs">{label}</span>
+    </div>
+    <p className="text-sm font-bold font-mono text-foreground">{value}</p>
+  </div>
+);
+
+export default Martingale;

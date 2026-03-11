@@ -1,0 +1,7 @@
+project_id = "wrgwbzbmqphnjwalodsd"
+
+[functions.check-stock-alerts]
+verify_jwt = false
+
+[functions.martingale-bot]
+verify_jwt = false
