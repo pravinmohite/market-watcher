@@ -481,10 +481,6 @@ serve(async (req) => {
     const botToken = Deno.env.get('TELEGRAM_BOT_TOKEN');
     const chatId = Deno.env.get('TELEGRAM_CHAT_ID');
 
-    if (!botToken || !chatId) {
-      throw new Error('TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not configured');
-    }
-
     const { cookies, headers } = await getNSESession();
 
     let stocks = await fetchNSEData(headers);
