@@ -629,10 +629,25 @@ serve(async (req) => {
 
       console.log(`NSE fallback - CE ${otmCEStrike}: ₹${otmCEPrice}, PE ${otmPEStrike}: ₹${otmPEPrice}`);
 
+      // Estimate specific price for tick monitoring if requested
+      let specificPrice = null;
+      if (body.strike && body.optionType) {
+        const dist = Math.abs(body.strike - niftySpot);
+        const baseEstimate = parseFloat(Math.max(5, niftySpot * 0.013 - dist * 0.5).toFixed(2));
+        // If we have entry price and entry spot, simulate price movement
+        if (body.entryPrice && body.entrySpot) {
+          const spotChange = niftySpot - body.entrySpot;
+          const delta = body.optionType === 'CE' ? 0.3 : -0.3;
+          specificPrice = parseFloat(Math.max(1, body.entryPrice + spotChange * delta).toFixed(2));
+        } else {
+          specificPrice = baseEstimate;
+        }
+      }
+
       return new Response(JSON.stringify({
         success: true,
         niftySpot, atmStrike, otmCEStrike, otmPEStrike, otmCEPrice, otmPEPrice, strikeDiff,
-        specificPrice: null, expiry: getNextWeeklyExpiry(), source: 'nse-estimate',
+        specificPrice, expiry: getNextWeeklyExpiry(), source: 'nse-estimate',
       }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
     }
 
