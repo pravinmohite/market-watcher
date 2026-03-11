@@ -458,24 +458,57 @@ serve(async (req) => {
       const otmCEStrike = atmStrike + strikeDiff;
       const otmPEStrike = atmStrike - strikeDiff;
 
+      // Calculate nearest weekly expiry (Thursday)
+      function getNextWeeklyExpiry(): string {
+        const now = new Date();
+        const day = now.getDay(); // 0=Sun, 4=Thu
+        let daysUntilThursday = (4 - day + 7) % 7;
+        if (daysUntilThursday === 0) {
+          // If today is Thursday and market is still open, use today
+          const hours = now.getUTCHours() + 5.5; // IST
+          if (hours >= 15.5) daysUntilThursday = 7; // market closed, next week
+        }
+        const expiry = new Date(now);
+        expiry.setDate(now.getDate() + daysUntilThursday);
+        const dd = String(expiry.getDate()).padStart(2, '0');
+        const mmm = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][expiry.getMonth()];
+        const yyyy = expiry.getFullYear();
+        return `${dd}-${mmm}-${yyyy}`;
+      }
+
+      const weeklyExpiry = getNextWeeklyExpiry();
+
       // Fetch real option chain prices from NSE
       let otmCEPrice = 0;
       let otmPEPrice = 0;
       let specificPrice = null;
+      let expiryUsed = weeklyExpiry;
 
       try {
         await new Promise(r => setTimeout(r, 500));
         const ocRes = await fetch("https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY", { headers });
         if (ocRes.ok) {
           const ocData = await ocRes.json();
-          const records = ocData?.filtered?.data || ocData?.records?.data || [];
+          const allRecords = ocData?.records?.data || [];
+          const expiryDates = ocData?.records?.expiryDates || [];
+          
+          // Use the nearest (first) expiry which is the weekly expiry
+          const nearestExpiry = expiryDates.length > 0 ? expiryDates[0] : null;
+          if (nearestExpiry) expiryUsed = nearestExpiry;
+          
+          // Filter records for the nearest weekly expiry
+          const records = nearestExpiry 
+            ? allRecords.filter((r: any) => r.expiryDate === nearestExpiry)
+            : ocData?.filtered?.data || allRecords;
+          
+          console.log(`Option chain: ${allRecords.length} total records, ${records.length} for expiry ${nearestExpiry || 'filtered'}`);
           
           for (const rec of records) {
             if (rec.strikePrice === otmCEStrike && rec.CE) {
-              otmCEPrice = rec.CE.lastPrice || rec.CE.askPrice || rec.CE.openInterest ? rec.CE.lastPrice : 0;
+              otmCEPrice = rec.CE.lastPrice || rec.CE.askPrice || 0;
             }
             if (rec.strikePrice === otmPEStrike && rec.PE) {
-              otmPEPrice = rec.PE.lastPrice || rec.PE.askPrice || rec.PE.openInterest ? rec.PE.lastPrice : 0;
+              otmPEPrice = rec.PE.lastPrice || rec.PE.askPrice || 0;
             }
             // If caller wants a specific strike/type price
             if (body.strike && body.optionType) {
@@ -492,11 +525,10 @@ serve(async (req) => {
           if (!otmCEPrice) otmCEPrice = parseFloat((niftySpot * 0.005).toFixed(2));
           if (!otmPEPrice) otmPEPrice = parseFloat((niftySpot * 0.005).toFixed(2));
           
-          console.log(`Real option chain - CE ${otmCEStrike}: ₹${otmCEPrice}, PE ${otmPEStrike}: ₹${otmPEPrice}, specific: ${specificPrice}`);
+          console.log(`Real option chain (${expiryUsed}) - CE ${otmCEStrike}: ₹${otmCEPrice}, PE ${otmPEStrike}: ₹${otmPEPrice}, specific: ${specificPrice}`);
         } else {
           console.error(`Option chain fetch failed: ${ocRes.status}`);
           await ocRes.text();
-          // Fallback to estimated prices
           otmCEPrice = parseFloat((niftySpot * 0.005).toFixed(2));
           otmPEPrice = parseFloat((niftySpot * 0.005).toFixed(2));
         }
@@ -506,7 +538,7 @@ serve(async (req) => {
         otmPEPrice = parseFloat((niftySpot * 0.005).toFixed(2));
       }
 
-      console.log(`Nifty spot: ${niftySpot}, ATM: ${atmStrike}, CE: ${otmCEStrike}@${otmCEPrice}, PE: ${otmPEStrike}@${otmPEPrice}`);
+      console.log(`Nifty spot: ${niftySpot}, ATM: ${atmStrike}, Expiry: ${expiryUsed}`);
 
       return new Response(JSON.stringify({
         success: true,
