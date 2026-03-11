@@ -54,14 +54,25 @@ const Martingale = () => {
     refetchInterval: 60000,
   });
 
+  const [lastTickAction, setLastTickAction] = useState<string | null>(null);
+
   const { data, isLoading, refetch } = useQuery({
     queryKey: ["martingale-status"],
     queryFn: async () => {
-      const { data, error } = await supabase.functions.invoke("martingale-bot", {
+      // First trigger a tick to execute any pending trades
+      const { data: tickData } = await supabase.functions.invoke("martingale-bot", {
+        body: { action: "tick" },
+      });
+      if (tickData?.action && tickData.action !== lastTickAction && !tickData.action.startsWith('Monitoring')) {
+        setLastTickAction(tickData.action);
+        toast.info(tickData.action);
+      }
+      // Then get full status
+      const { data: statusData, error } = await supabase.functions.invoke("martingale-bot", {
         body: { action: "status" },
       });
       if (error) throw error;
-      return data;
+      return statusData;
     },
     refetchInterval: 15000,
   });
