@@ -167,6 +167,20 @@ serve(async (req) => {
     }
 
     if (action === 'start') {
+      // Market hours guard for start action
+      const nowIST_start = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+      const startHour = nowIST_start.getHours();
+      const startMinute = nowIST_start.getMinutes();
+      const startTime = startHour * 60 + startMinute;
+      const mktOpen = 9 * 60 + 15;
+      const mktClose = 15 * 60 + 30;
+
+      if (startTime < mktOpen || startTime > mktClose) {
+        return new Response(JSON.stringify({ success: false, message: `Cannot start outside market hours (9:15 AM - 3:30 PM IST). Current time: ${startHour}:${String(startMinute).padStart(2, '0')} IST` }), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+
       const { data: existing } = await supabase
         .from('martingale_sessions')
         .select('id')
