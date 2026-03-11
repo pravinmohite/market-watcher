@@ -191,6 +191,13 @@ serve(async (req) => {
         .single();
       if (sessErr) throw sessErr;
 
+      // Don't enter trade if price is 0
+      if (optionData.otmCEPrice <= 0) {
+        return new Response(JSON.stringify({ success: false, message: `Cannot start: option price is ₹0. Upstox may not be returning data. Source: ${optionData.source || 'unknown'}` }), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+
       const { error: tradeErr } = await supabase
         .from('martingale_trades')
         .insert({
