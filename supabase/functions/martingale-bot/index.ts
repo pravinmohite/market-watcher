@@ -242,6 +242,42 @@ serve(async (req) => {
       });
     }
 
+    // Check if it's 3:29 PM IST or later - auto square off
+    const nowIST = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+    const istHour = nowIST.getHours();
+    const istMinute = nowIST.getMinutes();
+    const isPastSquareOff = istHour > 15 || (istHour === 15 && istMinute >= 29);
+
+    if (isPastSquareOff && openTrade) {
+      const { specificPrice: sqPrice } = await fetchNiftyOptionChain(
+        supabaseUrl, anonKey, openTrade.strike_price, openTrade.option_type, openTrade.nifty_spot, openTrade.entry_price
+      );
+      const exitPrice = sqPrice !== null ? sqPrice : openTrade.entry_price;
+      const sqPnl = (exitPrice - openTrade.entry_price) * openTrade.lots * LOT_SIZE;
+
+      await supabase.from('martingale_trades').update({
+        status: 'closed', exit_price: exitPrice, pnl: sqPnl, exit_time: new Date().toISOString(),
+      }).eq('id', openTrade.id);
+
+      await supabase.from('martingale_sessions').update({
+        status: 'squared_off', total_pnl: activeSession.total_pnl + sqPnl, completed_at: new Date().toISOString(),
+      }).eq('id', activeSession.id);
+
+      const msg = `🕒 *3:29 PM Square Off*\nExited ${openTrade.option_type} ${openTrade.strike_price} @ ₹${exitPrice} (P&L: ₹${sqPnl.toFixed(0)})`;
+      const botToken = Deno.env.get('TELEGRAM_BOT_TOKEN');
+      const chatId = Deno.env.get('TELEGRAM_CHAT_ID');
+      if (botToken && chatId) {
+        await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ chat_id: chatId, text: msg, parse_mode: 'Markdown' }),
+        });
+      }
+
+      return new Response(JSON.stringify({
+        success: true, action: `🕒 3:29 PM Square Off! Exited ${openTrade.option_type} ${openTrade.strike_price} @ ₹${exitPrice} (P&L: ₹${sqPnl.toFixed(0)})`,
+      }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+    }
+
     const { specificPrice: currentPrice } = await fetchNiftyOptionChain(
       supabaseUrl, anonKey, openTrade.strike_price, openTrade.option_type, openTrade.nifty_spot, openTrade.entry_price
     );
