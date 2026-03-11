@@ -14,7 +14,152 @@ export type Database = {
   }
   public: {
     Tables: {
-      [_ in never]: never
+      martingale_sessions: {
+        Row: {
+          completed_at: string | null
+          created_at: string
+          current_round: number
+          id: string
+          max_rounds: number
+          status: string
+          total_pnl: number
+        }
+        Insert: {
+          completed_at?: string | null
+          created_at?: string
+          current_round?: number
+          id?: string
+          max_rounds?: number
+          status?: string
+          total_pnl?: number
+        }
+        Update: {
+          completed_at?: string | null
+          created_at?: string
+          current_round?: number
+          id?: string
+          max_rounds?: number
+          status?: string
+          total_pnl?: number
+        }
+        Relationships: []
+      }
+      martingale_trades: {
+        Row: {
+          entry_price: number
+          entry_time: string
+          exit_price: number | null
+          exit_time: string | null
+          id: string
+          lots: number
+          nifty_spot: number | null
+          option_type: string
+          pnl: number | null
+          round: number
+          session_id: string
+          status: string
+          strike_price: number
+        }
+        Insert: {
+          entry_price: number
+          entry_time?: string
+          exit_price?: number | null
+          exit_time?: string | null
+          id?: string
+          lots?: number
+          nifty_spot?: number | null
+          option_type: string
+          pnl?: number | null
+          round: number
+          session_id: string
+          status?: string
+          strike_price: number
+        }
+        Update: {
+          entry_price?: number
+          entry_time?: string
+          exit_price?: number | null
+          exit_time?: string | null
+          id?: string
+          lots?: number
+          nifty_spot?: number | null
+          option_type?: string
+          pnl?: number | null
+          round?: number
+          session_id?: string
+          status?: string
+          strike_price?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "martingale_trades_session_id_fkey"
+            columns: ["session_id"]
+            isOneToOne: false
+            referencedRelation: "martingale_sessions"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      stock_alerts: {
+        Row: {
+          alerted_at: string
+          change_percent: number
+          created_at: string
+          current_price: number
+          direction: string
+          id: string
+          name: string
+          open_price: number
+          symbol: string
+        }
+        Insert: {
+          alerted_at?: string
+          change_percent: number
+          created_at?: string
+          current_price: number
+          direction: string
+          id?: string
+          name: string
+          open_price: number
+          symbol: string
+        }
+        Update: {
+          alerted_at?: string
+          change_percent?: number
+          created_at?: string
+          current_price?: number
+          direction?: string
+          id?: string
+          name?: string
+          open_price?: number
+          symbol?: string
+        }
+        Relationships: []
+      }
+      stock_iv_history: {
+        Row: {
+          created_at: string
+          id: string
+          iv: number
+          recorded_date: string
+          symbol: string
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          iv: number
+          recorded_date?: string
+          symbol: string
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          iv?: number
+          recorded_date?: string
+          symbol?: string
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never
