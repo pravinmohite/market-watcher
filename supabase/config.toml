@@ -5,3 +5,6 @@ verify_jwt = false
 
 [functions.martingale-bot]
 verify_jwt = false
+
+[functions.upstox-auth]
+verify_jwt = false
