@@ -160,6 +160,30 @@ export type Database = {
         }
         Relationships: []
       }
+      upstox_tokens: {
+        Row: {
+          access_token: string
+          created_at: string
+          expires_at: string
+          id: string
+          token_type: string | null
+        }
+        Insert: {
+          access_token: string
+          created_at?: string
+          expires_at: string
+          id?: string
+          token_type?: string | null
+        }
+        Update: {
+          access_token?: string
+          created_at?: string
+          expires_at?: string
+          id?: string
+          token_type?: string | null
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never

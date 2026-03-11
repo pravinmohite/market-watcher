@@ -1,14 +1,58 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
-import { Play, Square, RefreshCw, Zap, TrendingUp, TrendingDown, ArrowLeftRight, AlertTriangle, DollarSign, Activity, ArrowLeft } from "lucide-react";
+import { Play, Square, RefreshCw, Zap, TrendingUp, TrendingDown, ArrowLeftRight, AlertTriangle, DollarSign, Activity, ArrowLeft, Link2, Unlink } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 
 const Martingale = () => {
   const queryClient = useQueryClient();
+  const [searchParams, setSearchParams] = useSearchParams();
+
+  // Check for Upstox OAuth callback code in URL
+  useEffect(() => {
+    const code = searchParams.get('code');
+    if (code) {
+      // Exchange the code for an access token
+      const exchangeCode = async () => {
+        try {
+          const redirectUri = `${window.location.origin}/martingale`;
+          const { data, error } = await supabase.functions.invoke("upstox-auth", {
+            body: { action: "exchange", code, redirect_uri: redirectUri },
+          });
+          if (error) throw error;
+          if (data?.success) {
+            toast.success("Upstox connected! Real-time option data enabled.");
+            queryClient.invalidateQueries({ queryKey: ["upstox-status"] });
+            queryClient.invalidateQueries({ queryKey: ["martingale-status"] });
+          } else {
+            toast.error(data?.error || "Failed to connect Upstox");
+          }
+        } catch (err: any) {
+          toast.error("Failed to exchange Upstox auth code");
+          console.error(err);
+        }
+        // Clean URL
+        setSearchParams({});
+      };
+      exchangeCode();
+    }
+  }, [searchParams]);
+
+  // Check Upstox token status
+  const { data: upstoxStatus } = useQuery({
+    queryKey: ["upstox-status"],
+    queryFn: async () => {
+      const { data, error } = await supabase.functions.invoke("upstox-auth", {
+        body: { action: "check-token" },
+      });
+      if (error) throw error;
+      return data;
+    },
+    refetchInterval: 60000,
+  });
 
   const { data, isLoading, refetch } = useQuery({
     queryKey: ["martingale-status"],
@@ -20,6 +64,23 @@ const Martingale = () => {
       return data;
     },
     refetchInterval: 15000,
+  });
+
+  const connectUpstox = useMutation({
+    mutationFn: async () => {
+      const redirectUri = `${window.location.origin}/martingale`;
+      const { data, error } = await supabase.functions.invoke("upstox-auth", {
+        body: { action: "get-auth-url", redirect_uri: redirectUri },
+      });
+      if (error) throw error;
+      return data;
+    },
+    onSuccess: (data) => {
+      if (data?.auth_url) {
+        window.location.href = data.auth_url;
+      }
+    },
+    onError: () => toast.error("Failed to get Upstox auth URL"),
   });
 
   const startBot = useMutation({
@@ -75,6 +136,8 @@ const Martingale = () => {
   const recentSessions = data?.recent_sessions || [];
   const allTrades = data?.all_trades || [];
   const isActive = activeSession?.status === 'active';
+  const isUpstoxConnected = upstoxStatus?.connected;
+  const dataSource = optionData?.source;
 
   return (
     <div className="min-h-screen bg-background">
@@ -116,6 +179,48 @@ const Martingale = () => {
       </header>
 
       <main className="container mx-auto px-4 py-6 space-y-6">
+        {/* Upstox Connection Banner */}
+        <div className={cn(
+          "rounded-xl border p-4 flex items-center justify-between",
+          isUpstoxConnected ? "border-gain/30 bg-gain/5" : "border-warning/30 bg-warning/5"
+        )}>
+          <div className="flex items-center gap-3">
+            {isUpstoxConnected ? (
+              <Link2 className="w-4 h-4 text-gain" />
+            ) : (
+              <Unlink className="w-4 h-4 text-warning" />
+            )}
+            <div>
+              <p className="text-sm font-medium text-foreground">
+                {isUpstoxConnected ? "Upstox Connected" : "Upstox Not Connected"}
+              </p>
+              <p className="text-xs text-muted-foreground">
+                {isUpstoxConnected
+                  ? `Real-time option data active • Source: Upstox API`
+                  : "Connect Upstox for accurate real-time option prices (login required daily)"
+                }
+              </p>
+              {dataSource && (
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  Current data source: <span className="font-mono font-medium text-foreground">{dataSource}</span>
+                </p>
+              )}
+            </div>
+          </div>
+          {!isUpstoxConnected && (
+            <Button
+              onClick={() => connectUpstox.mutate()}
+              disabled={connectUpstox.isPending}
+              variant="outline"
+              size="sm"
+              className="gap-1.5 border-warning/50 text-warning hover:bg-warning/10"
+            >
+              <Link2 className="w-3.5 h-3.5" />
+              {connectUpstox.isPending ? "Redirecting..." : "Connect Upstox"}
+            </Button>
+          )}
+        </div>
+
         {/* Status Banner */}
         <div className={cn(
           "rounded-xl border p-4",

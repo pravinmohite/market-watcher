@@ -456,6 +456,119 @@ serve(async (req) => {
 
     // Handle nifty option chain request (used by martingale bot)
     if (body.action === 'nifty-option-chain') {
+      // Try Upstox API first if we have a valid token
+      const { data: upstoxToken } = await supabase
+        .from('upstox_tokens')
+        .select('access_token')
+        .gt('expires_at', new Date().toISOString())
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (upstoxToken?.access_token) {
+        try {
+          console.log('Using Upstox API for option chain data');
+          const upstoxHeaders = {
+            'Accept': 'application/json',
+            'Authorization': `Bearer ${upstoxToken.access_token}`,
+          };
+
+          // Get Nifty spot price from Upstox market quotes
+          const quoteRes = await fetch(
+            'https://api.upstox.com/v2/market-quote/quotes?instrument_key=NSE_INDEX%7CNifty%2050',
+            { headers: upstoxHeaders }
+          );
+
+          if (!quoteRes.ok) {
+            const errText = await quoteRes.text();
+            console.error(`Upstox quote API failed (${quoteRes.status}): ${errText.substring(0, 200)}`);
+            throw new Error('Upstox quote API failed');
+          }
+
+          const quoteData = await quoteRes.json();
+          const niftyQuote = quoteData?.data?.['NSE_INDEX:Nifty 50'];
+          if (!niftyQuote) throw new Error('Nifty quote not found in Upstox response');
+
+          const niftySpot = niftyQuote.last_price;
+          const strikeDiff = 50;
+          const atmStrike = Math.round(niftySpot / strikeDiff) * strikeDiff;
+          const otmCEStrike = atmStrike + strikeDiff;
+          const otmPEStrike = atmStrike - strikeDiff;
+
+          // Calculate nearest weekly expiry (Thursday) in YYYY-MM-DD format for Upstox
+          function getNextWeeklyExpiryISO(): { iso: string; display: string } {
+            const now = new Date();
+            const day = now.getDay();
+            let daysUntilThursday = (4 - day + 7) % 7;
+            if (daysUntilThursday === 0) {
+              const hours = now.getUTCHours() + 5.5;
+              if (hours >= 15.5) daysUntilThursday = 7;
+            }
+            const expiry = new Date(now);
+            expiry.setDate(now.getDate() + daysUntilThursday);
+            const yyyy = expiry.getFullYear();
+            const mm = String(expiry.getMonth() + 1).padStart(2, '0');
+            const dd = String(expiry.getDate()).padStart(2, '0');
+            const mmm = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][expiry.getMonth()];
+            return { iso: `${yyyy}-${mm}-${dd}`, display: `${dd}-${mmm}-${yyyy}` };
+          }
+
+          const expiry = getNextWeeklyExpiryISO();
+
+          // Fetch option chain from Upstox
+          const ocRes = await fetch(
+            `https://api.upstox.com/v2/option/chain?instrument_key=NSE_INDEX%7CNifty%2050&expiry_date=${expiry.iso}`,
+            { headers: upstoxHeaders }
+          );
+
+          let otmCEPrice = 0;
+          let otmPEPrice = 0;
+          let specificPrice = null;
+
+          if (ocRes.ok) {
+            const ocData = await ocRes.json();
+            const options = ocData?.data || [];
+            console.log(`Upstox option chain: ${options.length} entries for expiry ${expiry.iso}`);
+
+            for (const entry of options) {
+              const strikePrice = entry.strike_price;
+
+              if (strikePrice === otmCEStrike && entry.call_options?.market_data) {
+                otmCEPrice = entry.call_options.market_data.ltp || entry.call_options.market_data.ask_price || 0;
+              }
+              if (strikePrice === otmPEStrike && entry.put_options?.market_data) {
+                otmPEPrice = entry.put_options.market_data.ltp || entry.put_options.market_data.ask_price || 0;
+              }
+
+              // For specific strike/type lookup (used by tick)
+              if (body.strike && body.optionType && strikePrice === body.strike) {
+                const side = body.optionType === 'CE' ? entry.call_options : entry.put_options;
+                if (side?.market_data) {
+                  specificPrice = side.market_data.ltp || side.market_data.ask_price || null;
+                }
+              }
+            }
+
+            console.log(`Upstox prices - CE ${otmCEStrike}: ₹${otmCEPrice}, PE ${otmPEStrike}: ₹${otmPEPrice}, specific: ${specificPrice}`);
+          } else {
+            const errText = await ocRes.text();
+            console.error(`Upstox option chain failed (${ocRes.status}): ${errText.substring(0, 200)}`);
+          }
+
+          return new Response(JSON.stringify({
+            success: true,
+            niftySpot, atmStrike, otmCEStrike, otmPEStrike, otmCEPrice, otmPEPrice, strikeDiff,
+            specificPrice, expiry: expiry.display, source: 'upstox',
+          }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        } catch (upstoxErr) {
+          console.error('Upstox API error, falling back to NSE:', upstoxErr);
+          // Fall through to NSE fallback below
+        }
+      } else {
+        console.log('No valid Upstox token, using NSE fallback');
+      }
+
+      // NSE Fallback (original logic)
       const { cookies, headers } = await getNSESession();
 
       const niftyRes = await fetch("https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%2050", { headers });
@@ -479,15 +592,19 @@ serve(async (req) => {
       const otmCEStrike = atmStrike + strikeDiff;
       const otmPEStrike = atmStrike - strikeDiff;
 
-      // Calculate nearest weekly expiry (Thursday)
+      // Fallback estimation
+      const distCE = Math.abs(otmCEStrike - niftySpot);
+      const otmCEPrice = parseFloat(Math.max(5, niftySpot * 0.013 - distCE * 0.5).toFixed(2));
+      const distPE = Math.abs(otmPEStrike - niftySpot);
+      const otmPEPrice = parseFloat(Math.max(5, niftySpot * 0.013 - distPE * 0.5).toFixed(2));
+
       function getNextWeeklyExpiry(): string {
         const now = new Date();
-        const day = now.getDay(); // 0=Sun, 4=Thu
+        const day = now.getDay();
         let daysUntilThursday = (4 - day + 7) % 7;
         if (daysUntilThursday === 0) {
-          // If today is Thursday and market is still open, use today
-          const hours = now.getUTCHours() + 5.5; // IST
-          if (hours >= 15.5) daysUntilThursday = 7; // market closed, next week
+          const hours = now.getUTCHours() + 5.5;
+          if (hours >= 15.5) daysUntilThursday = 7;
         }
         const expiry = new Date(now);
         expiry.setDate(now.getDate() + daysUntilThursday);
@@ -497,138 +614,12 @@ serve(async (req) => {
         return `${dd}-${mmm}-${yyyy}`;
       }
 
-      const weeklyExpiry = getNextWeeklyExpiry();
-
-      // Fetch real option chain prices from NSE
-      let otmCEPrice = 0;
-      let otmPEPrice = 0;
-      let specificPrice = null;
-      let expiryUsed = weeklyExpiry;
-
-      try {
-        await new Promise(r => setTimeout(r, 1000));
-        
-        // First try the option chain API directly
-        const ocRes = await fetch("https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY", { headers });
-        let ocParsed = false;
-        
-        if (ocRes.ok) {
-          const ocText = await ocRes.text();
-          try {
-            const ocData = JSON.parse(ocText);
-            console.log(`Option chain response keys: ${JSON.stringify(Object.keys(ocData || {}))}`);
-            console.log(`records keys: ${JSON.stringify(Object.keys(ocData?.records || {}))}`);
-            console.log(`filtered keys: ${JSON.stringify(Object.keys(ocData?.filtered || {}))}`);
-            
-            // Try filtered.data first (more reliable), then records.data
-            const filteredRecords = ocData?.filtered?.data || [];
-            const allRecords = ocData?.records?.data || [];
-            const expiryDates = ocData?.records?.expiryDates || ocData?.filtered?.expiryDates || [];
-            
-            console.log(`Option chain: ${allRecords.length} total, ${filteredRecords.length} filtered, ${expiryDates.length} expiries`);
-            
-            const nearestExpiry = expiryDates.length > 0 ? expiryDates[0] : null;
-            if (nearestExpiry) expiryUsed = nearestExpiry;
-            
-            // Use filtered data if available, otherwise filter allRecords by expiry
-            let records = filteredRecords.length > 0 ? filteredRecords : allRecords;
-            if (nearestExpiry && filteredRecords.length === 0 && allRecords.length > 0) {
-              records = allRecords.filter((r: any) => r.expiryDate === nearestExpiry);
-            }
-            
-            console.log(`Using ${records.length} records for expiry ${expiryUsed}`);
-            
-            for (const rec of records) {
-              if (rec.strikePrice === otmCEStrike && rec.CE) {
-                otmCEPrice = rec.CE.lastPrice || rec.CE.askPrice || 0;
-              }
-              if (rec.strikePrice === otmPEStrike && rec.PE) {
-                otmPEPrice = rec.PE.lastPrice || rec.PE.askPrice || 0;
-              }
-              if (body.strike && body.optionType && rec.strikePrice === body.strike) {
-                const side = rec[body.optionType];
-                if (side) {
-                  specificPrice = side.lastPrice || side.askPrice || null;
-                }
-              }
-            }
-            
-            if (otmCEPrice > 0 || otmPEPrice > 0) ocParsed = true;
-          } catch (parseErr) {
-            console.error(`Option chain JSON parse failed, response starts with: ${ocText.substring(0, 200)}`);
-          }
-        } else {
-          const errBody = await ocRes.text();
-          console.error(`Option chain HTTP ${ocRes.status}: ${errBody.substring(0, 200)}`);
-        }
-        
-        // If option chain failed, try fetching from quote API as fallback
-        if (!ocParsed) {
-          console.log('Option chain empty/blocked, trying quote API fallback...');
-          await new Promise(r => setTimeout(r, 500));
-          
-          try {
-            const quoteRes = await fetch("https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY", {
-              headers: {
-                ...headers,
-                "Referer": "https://www.nseindia.com/option-chain",
-                "Accept": "*/*",
-              },
-            });
-            
-            if (quoteRes.ok) {
-              const quoteData = await quoteRes.json();
-              const records = quoteData?.filtered?.data || quoteData?.records?.data || [];
-              const expiryDates = quoteData?.records?.expiryDates || [];
-              if (expiryDates.length > 0) expiryUsed = expiryDates[0];
-              
-              console.log(`Retry option chain: ${records.length} records`);
-              
-              for (const rec of records) {
-                if (rec.strikePrice === otmCEStrike && rec.CE) {
-                  otmCEPrice = rec.CE.lastPrice || rec.CE.askPrice || 0;
-                }
-                if (rec.strikePrice === otmPEStrike && rec.PE) {
-                  otmPEPrice = rec.PE.lastPrice || rec.PE.askPrice || 0;
-                }
-                if (body.strike && body.optionType && rec.strikePrice === body.strike) {
-                  const side = rec[body.optionType];
-                  if (side) specificPrice = side.lastPrice || side.askPrice || null;
-                }
-              }
-            } else {
-              await quoteRes.text();
-            }
-          } catch (retryErr) {
-            console.error("Retry option chain failed:", retryErr);
-          }
-        }
-        
-        // Final fallback - use a more realistic estimation based on distance from ATM
-        if (!otmCEPrice) {
-          const distCE = Math.abs(otmCEStrike - niftySpot);
-          otmCEPrice = parseFloat(Math.max(5, niftySpot * 0.013 - distCE * 0.5).toFixed(2));
-          console.log(`CE fallback estimate: ₹${otmCEPrice} (dist=${distCE})`);
-        }
-        if (!otmPEPrice) {
-          const distPE = Math.abs(otmPEStrike - niftySpot);
-          otmPEPrice = parseFloat(Math.max(5, niftySpot * 0.013 - distPE * 0.5).toFixed(2));
-          console.log(`PE fallback estimate: ₹${otmPEPrice} (dist=${distPE})`);
-        }
-        
-        console.log(`Final prices (${expiryUsed}) - CE ${otmCEStrike}: ₹${otmCEPrice}, PE ${otmPEStrike}: ₹${otmPEPrice}, specific: ${specificPrice}`);
-      } catch (ocError) {
-        console.error("Option chain fetch error:", ocError);
-        otmCEPrice = parseFloat((niftySpot * 0.013).toFixed(2));
-        otmPEPrice = parseFloat((niftySpot * 0.013).toFixed(2));
-      }
-
-      console.log(`Nifty spot: ${niftySpot}, ATM: ${atmStrike}, Expiry: ${expiryUsed}`);
+      console.log(`NSE fallback - CE ${otmCEStrike}: ₹${otmCEPrice}, PE ${otmPEStrike}: ₹${otmPEPrice}`);
 
       return new Response(JSON.stringify({
         success: true,
         niftySpot, atmStrike, otmCEStrike, otmPEStrike, otmCEPrice, otmPEPrice, strikeDiff,
-        specificPrice, expiry: expiryUsed,
+        specificPrice: null, expiry: getNextWeeklyExpiry(), source: 'nse-estimate',
       }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
     }
 
