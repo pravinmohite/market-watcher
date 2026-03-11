@@ -464,6 +464,87 @@ const Martingale = () => {
   );
 };
 
+const DateWisePnL = ({ sessions, allTrades }: { sessions: any[]; allTrades: any[] }) => {
+  const dateData = useMemo(() => {
+    const byDate: Record<string, { pnl: number; trades: number; sessions: number }> = {};
+    
+    for (const session of sessions) {
+      if (session.status === 'active') continue;
+      const date = new Date(session.created_at).toLocaleDateString('en-IN', { year: 'numeric', month: 'short', day: '2-digit' });
+      if (!byDate[date]) byDate[date] = { pnl: 0, trades: 0, sessions: 0 };
+      byDate[date].pnl += Number(session.total_pnl);
+      byDate[date].sessions += 1;
+    }
+    
+    for (const trade of allTrades) {
+      if (trade.status !== 'closed') continue;
+      const date = new Date(trade.entry_time).toLocaleDateString('en-IN', { year: 'numeric', month: 'short', day: '2-digit' });
+      if (!byDate[date]) byDate[date] = { pnl: 0, trades: 0, sessions: 0 };
+      byDate[date].trades += 1;
+    }
+    
+    return Object.entries(byDate)
+      .sort(([a], [b]) => new Date(b).getTime() - new Date(a).getTime());
+  }, [sessions, allTrades]);
+
+  if (dateData.length === 0) return null;
+
+  const totalPnl = dateData.reduce((sum, [, d]) => sum + d.pnl, 0);
+  const winDays = dateData.filter(([, d]) => d.pnl > 0).length;
+  const lossDays = dateData.filter(([, d]) => d.pnl < 0).length;
+
+  return (
+    <section>
+      <h2 className="text-base font-semibold text-foreground mb-3 flex items-center gap-2">
+        <Calendar className="w-4 h-4 text-primary" />
+        Date-wise P&L
+      </h2>
+      {/* Summary */}
+      <div className="grid grid-cols-3 gap-3 mb-3">
+        <div className="rounded-xl border border-border bg-card p-3 text-center">
+          <p className="text-xs text-muted-foreground">Total P&L</p>
+          <p className={cn("text-lg font-bold font-mono", totalPnl >= 0 ? "text-gain" : "text-loss")}>
+            ₹{totalPnl.toFixed(0)}
+          </p>
+        </div>
+        <div className="rounded-xl border border-border bg-card p-3 text-center">
+          <p className="text-xs text-muted-foreground">Win Days</p>
+          <p className="text-lg font-bold font-mono text-gain">{winDays}</p>
+        </div>
+        <div className="rounded-xl border border-border bg-card p-3 text-center">
+          <p className="text-xs text-muted-foreground">Loss Days</p>
+          <p className="text-lg font-bold font-mono text-loss">{lossDays}</p>
+        </div>
+      </div>
+      {/* Daily breakdown */}
+      <div className="overflow-x-auto rounded-xl border border-border">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b border-border bg-muted/50">
+              <th className="text-left p-3 text-muted-foreground font-medium">Date</th>
+              <th className="text-right p-3 text-muted-foreground font-medium">Sessions</th>
+              <th className="text-right p-3 text-muted-foreground font-medium">Trades</th>
+              <th className="text-right p-3 text-muted-foreground font-medium">P&L</th>
+            </tr>
+          </thead>
+          <tbody>
+            {dateData.map(([date, d]) => (
+              <tr key={date} className="border-b border-border/50 hover:bg-muted/30 transition-colors">
+                <td className="p-3 font-mono text-foreground">{date}</td>
+                <td className="p-3 text-right font-mono text-muted-foreground">{d.sessions}</td>
+                <td className="p-3 text-right font-mono text-muted-foreground">{d.trades}</td>
+                <td className={cn("p-3 text-right font-mono font-medium", d.pnl >= 0 ? "text-gain" : "text-loss")}>
+                  ₹{d.pnl.toFixed(0)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+};
+
 const MartingaleStatCard = ({ icon, label, value }: { icon: React.ReactNode; label: string; value: string }) => (
   <div className="rounded-xl border border-border p-3 bg-card">
     <div className="flex items-center gap-1.5 text-muted-foreground mb-1">
