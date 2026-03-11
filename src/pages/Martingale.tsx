@@ -305,7 +305,8 @@ const Martingale = () => {
               </div>
               <div className="mt-4 flex items-center gap-4 text-xs text-muted-foreground">
                 <span>Round {activeTrade.round}</span>
-                <span>Qty: {activeTrade.lots * 75}</span>
+                <span>Qty: {activeTrade.lots * 65}</span>
+                <span>Capital: ₹{(activeTrade.lots * 65 * Number(activeTrade.entry_price)).toFixed(0)}</span>
                 <span>Entered: {new Date(activeTrade.entry_time).toLocaleTimeString('en-IN')}</span>
               </div>
               {/* P&L Bar */}
@@ -351,7 +352,7 @@ const Martingale = () => {
               <p>🔄 Auto-restarts after profit or max rounds</p>
               <p>🕒 Auto square-off at <strong className="text-foreground">3:29 PM</strong></p>
               <p>📊 Paper trading only — no real orders</p>
-              <p>⚙️ Lot size: 75 (Nifty) • Weekly expiry</p>
+              <p>⚙️ Lot size: 65 (Nifty) • Weekly expiry</p>
             </div>
           </div>
         </section>
@@ -372,8 +373,10 @@ const Martingale = () => {
                     <th className="text-left p-3 text-muted-foreground font-medium">Time</th>
                     <th className="text-left p-3 text-muted-foreground font-medium">Round</th>
                     <th className="text-left p-3 text-muted-foreground font-medium">Option</th>
-                    <th className="text-right p-3 text-muted-foreground font-medium">Lots</th>
-                    <th className="text-right p-3 text-muted-foreground font-medium">Entry</th>
+                     <th className="text-right p-3 text-muted-foreground font-medium">Lots</th>
+                     <th className="text-right p-3 text-muted-foreground font-medium">Qty</th>
+                     <th className="text-right p-3 text-muted-foreground font-medium">Capital</th>
+                     <th className="text-right p-3 text-muted-foreground font-medium">Entry</th>
                     <th className="text-right p-3 text-muted-foreground font-medium">Exit</th>
                     <th className="text-right p-3 text-muted-foreground font-medium">P&L</th>
                     <th className="text-left p-3 text-muted-foreground font-medium">Status</th>
@@ -395,6 +398,8 @@ const Martingale = () => {
                         </span>
                       </td>
                       <td className="p-3 text-right font-mono text-foreground">{trade.lots}</td>
+                      <td className="p-3 text-right font-mono text-foreground">{trade.lots * 65}</td>
+                      <td className="p-3 text-right font-mono text-foreground">₹{(trade.lots * 65 * Number(trade.entry_price)).toFixed(0)}</td>
                       <td className="p-3 text-right font-mono text-foreground">₹{Number(trade.entry_price).toFixed(1)}</td>
                       <td className="p-3 text-right font-mono text-foreground">
                         {trade.exit_price ? `₹${Number(trade.exit_price).toFixed(1)}` : '—'}
