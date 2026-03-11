@@ -142,11 +142,12 @@ const Martingale = () => {
 
         {/* Market Data */}
         {optionData && (
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
             <MartingaleStatCard icon={<Activity className="w-4 h-4" />} label="Nifty Spot" value={`₹${optionData.niftySpot?.toFixed(0)}`} />
             <MartingaleStatCard icon={<TrendingUp className="w-4 h-4" />} label="OTM CE" value={`${optionData.otmCEStrike} @ ₹${optionData.otmCEPrice?.toFixed(1)}`} />
             <MartingaleStatCard icon={<TrendingDown className="w-4 h-4" />} label="OTM PE" value={`${optionData.otmPEStrike} @ ₹${optionData.otmPEPrice?.toFixed(1)}`} />
             <MartingaleStatCard icon={<ArrowLeftRight className="w-4 h-4" />} label="ATM Strike" value={optionData.atmStrike?.toString()} />
+            <MartingaleStatCard icon={<Zap className="w-4 h-4" />} label="Weekly Expiry" value={optionData.expiry || '—'} />
           </div>
         )}
 
