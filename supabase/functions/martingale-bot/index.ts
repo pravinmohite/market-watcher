@@ -7,8 +7,8 @@ const corsHeaders = {
 };
 
 const LOT_SIZE = 75;
-const PROFIT_TARGET = 20;
-const LOSS_LIMIT = 15;
+const PROFIT_TARGET = 3;
+const LOSS_LIMIT = 2;
 const MAX_ROUNDS = 5;
 
 interface OptionChainData {
