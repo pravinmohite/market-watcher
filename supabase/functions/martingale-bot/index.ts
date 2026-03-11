@@ -20,6 +20,7 @@ interface OptionChainData {
   otmPEPrice: number;
   strikeDiff: number;
   source?: string;
+  expiry?: string;
 }
 
 async function fetchNiftyOptionChain(supabaseUrl: string, anonKey: string, strike?: number, optionType?: string, entrySpot?: number, entryPrice?: number): Promise<{ optionData: OptionChainData | null; specificPrice: number | null }> {
