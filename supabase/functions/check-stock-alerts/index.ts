@@ -51,7 +51,7 @@ async function getNSESession(): Promise<{ cookies: string; headers: Record<strin
   let cookies = parseCookies(allCookies);
   console.log(`Session step 1 cookies: ${cookies.substring(0, 100)}...`);
 
-  await new Promise(r => setTimeout(r, 1000));
+  await new Promise(r => setTimeout(r, 1500));
   const warmupRes = await fetch("https://www.nseindia.com/option-chain", {
     headers: { ...baseHeaders, "Cookie": cookies, "Referer": "https://www.nseindia.com/" },
     redirect: "follow",
@@ -63,6 +63,27 @@ async function getNSESession(): Promise<{ cookies: string; headers: Record<strin
 
   cookies = parseCookies(allCookies);
   console.log(`Session step 2 cookies: ${cookies.substring(0, 100)}...`);
+
+  // Step 3: warm up the option chain API itself to get additional cookies
+  await new Promise(r => setTimeout(r, 1000));
+  const warmup2Res = await fetch("https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY", {
+    headers: {
+      "User-Agent": baseHeaders["User-Agent"],
+      "Accept": "application/json",
+      "Accept-Language": "en-US,en;q=0.9",
+      "Referer": "https://www.nseindia.com/option-chain",
+      "X-Requested-With": "XMLHttpRequest",
+      "Cookie": cookies,
+    },
+  });
+  warmup2Res.headers.forEach((value, key) => {
+    if (key.toLowerCase() === 'set-cookie') allCookies.push(value);
+  });
+  const warmup2Status = warmup2Res.status;
+  await warmup2Res.text();
+  
+  cookies = parseCookies(allCookies);
+  console.log(`Session step 3 (OC warmup status: ${warmup2Status}) cookies: ${cookies.substring(0, 100)}...`);
 
   const headers = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
