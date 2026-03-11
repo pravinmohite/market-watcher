@@ -40,7 +40,7 @@ async function fetchNiftyOptionChain(supabaseUrl: string, anonKey: string, strik
     const data = await res.json();
     if (!data.success) { console.error(`Proxy error: ${data.error}`); return { optionData: null, specificPrice: null }; }
     return {
-      optionData: { niftySpot: data.niftySpot, atmStrike: data.atmStrike, otmCEStrike: data.otmCEStrike, otmPEStrike: data.otmPEStrike, otmCEPrice: data.otmCEPrice, otmPEPrice: data.otmPEPrice, strikeDiff: data.strikeDiff, source: data.source },
+      optionData: { niftySpot: data.niftySpot, atmStrike: data.atmStrike, otmCEStrike: data.otmCEStrike, otmPEStrike: data.otmPEStrike, otmCEPrice: data.otmCEPrice, otmPEPrice: data.otmPEPrice, strikeDiff: data.strikeDiff, source: data.source, expiry: data.expiry },
       specificPrice: data.specificPrice,
     };
   } catch (error) { console.error("Option chain error:", error); return { optionData: null, specificPrice: null }; }
