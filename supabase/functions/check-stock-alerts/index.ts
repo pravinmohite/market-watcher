@@ -458,15 +458,52 @@ serve(async (req) => {
       const otmCEStrike = atmStrike + strikeDiff;
       const otmPEStrike = atmStrike - strikeDiff;
 
-      const premiumFactor = 0.005;
-      const otmCEPrice = parseFloat((niftySpot * premiumFactor * (0.8 + Math.random() * 0.4)).toFixed(2));
-      const otmPEPrice = parseFloat((niftySpot * premiumFactor * (0.8 + Math.random() * 0.4)).toFixed(2));
-
+      // Fetch real option chain prices from NSE
+      let otmCEPrice = 0;
+      let otmPEPrice = 0;
       let specificPrice = null;
-      if (body.strike && body.optionType && body.entrySpot && body.entryPrice) {
-        const spotChange = niftySpot - body.entrySpot;
-        const delta = body.optionType === 'CE' ? 0.35 : -0.35;
-        specificPrice = parseFloat(Math.max(0.5, body.entryPrice + (spotChange * delta)).toFixed(2));
+
+      try {
+        await new Promise(r => setTimeout(r, 500));
+        const ocRes = await fetch("https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY", { headers });
+        if (ocRes.ok) {
+          const ocData = await ocRes.json();
+          const records = ocData?.filtered?.data || ocData?.records?.data || [];
+          
+          for (const rec of records) {
+            if (rec.strikePrice === otmCEStrike && rec.CE) {
+              otmCEPrice = rec.CE.lastPrice || rec.CE.askPrice || rec.CE.openInterest ? rec.CE.lastPrice : 0;
+            }
+            if (rec.strikePrice === otmPEStrike && rec.PE) {
+              otmPEPrice = rec.PE.lastPrice || rec.PE.askPrice || rec.PE.openInterest ? rec.PE.lastPrice : 0;
+            }
+            // If caller wants a specific strike/type price
+            if (body.strike && body.optionType) {
+              if (rec.strikePrice === body.strike) {
+                const side = rec[body.optionType];
+                if (side) {
+                  specificPrice = side.lastPrice || side.askPrice || null;
+                }
+              }
+            }
+          }
+          
+          // Fallback if lastPrice is 0/null
+          if (!otmCEPrice) otmCEPrice = parseFloat((niftySpot * 0.005).toFixed(2));
+          if (!otmPEPrice) otmPEPrice = parseFloat((niftySpot * 0.005).toFixed(2));
+          
+          console.log(`Real option chain - CE ${otmCEStrike}: ₹${otmCEPrice}, PE ${otmPEStrike}: ₹${otmPEPrice}, specific: ${specificPrice}`);
+        } else {
+          console.error(`Option chain fetch failed: ${ocRes.status}`);
+          await ocRes.text();
+          // Fallback to estimated prices
+          otmCEPrice = parseFloat((niftySpot * 0.005).toFixed(2));
+          otmPEPrice = parseFloat((niftySpot * 0.005).toFixed(2));
+        }
+      } catch (ocError) {
+        console.error("Option chain fetch error:", ocError);
+        otmCEPrice = parseFloat((niftySpot * 0.005).toFixed(2));
+        otmPEPrice = parseFloat((niftySpot * 0.005).toFixed(2));
       }
 
       console.log(`Nifty spot: ${niftySpot}, ATM: ${atmStrike}, CE: ${otmCEStrike}@${otmCEPrice}, PE: ${otmPEStrike}@${otmPEPrice}`);
