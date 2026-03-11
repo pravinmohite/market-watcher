@@ -90,7 +90,7 @@ const Martingale = () => {
             </div>
             <div>
               <h1 className="text-lg font-bold text-foreground tracking-tight">Martingale Bot</h1>
-              <p className="text-xs text-muted-foreground">Paper Trading • Nifty Options • Doubling Strategy</p>
+              <p className="text-xs text-muted-foreground">Paper Trading • Nifty Weekly Options • Doubling Strategy</p>
             </div>
           </div>
           <div className="flex items-center gap-2">
