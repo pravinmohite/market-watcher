@@ -75,6 +75,7 @@ const Martingale = () => {
       return statusData;
     },
     refetchInterval: 15000,
+    refetchIntervalInBackground: true,
   });
 
   const connectUpstox = useMutation({

@@ -217,6 +217,21 @@ serve(async (req) => {
     }
 
     // action === 'tick'
+
+    // Market hours guard: only process ticks between 9:15 AM and 3:30 PM IST
+    const nowIST_tick = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+    const tickHour = nowIST_tick.getHours();
+    const tickMinute = nowIST_tick.getMinutes();
+    const tickTime = tickHour * 60 + tickMinute;
+    const marketOpen = 9 * 60 + 15;  // 9:15 AM
+    const marketClose = 15 * 60 + 30; // 3:30 PM
+
+    if (tickTime < marketOpen || tickTime > marketClose) {
+      return new Response(JSON.stringify({ success: true, message: `Outside market hours (${tickHour}:${String(tickMinute).padStart(2, '0')} IST). Skipping tick.` }), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+
     const { data: activeSession } = await supabase
       .from('martingale_sessions')
       .select('*')
