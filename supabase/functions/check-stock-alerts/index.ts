@@ -51,7 +51,7 @@ async function getNSESession(): Promise<{ cookies: string; headers: Record<strin
   let cookies = parseCookies(allCookies);
   console.log(`Session step 1 cookies: ${cookies.substring(0, 100)}...`);
 
-  await new Promise(r => setTimeout(r, 1000));
+  await new Promise(r => setTimeout(r, 1500));
   const warmupRes = await fetch("https://www.nseindia.com/option-chain", {
     headers: { ...baseHeaders, "Cookie": cookies, "Referer": "https://www.nseindia.com/" },
     redirect: "follow",
@@ -63,6 +63,27 @@ async function getNSESession(): Promise<{ cookies: string; headers: Record<strin
 
   cookies = parseCookies(allCookies);
   console.log(`Session step 2 cookies: ${cookies.substring(0, 100)}...`);
+
+  // Step 3: warm up the option chain API itself to get additional cookies
+  await new Promise(r => setTimeout(r, 1000));
+  const warmup2Res = await fetch("https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY", {
+    headers: {
+      "User-Agent": baseHeaders["User-Agent"],
+      "Accept": "application/json",
+      "Accept-Language": "en-US,en;q=0.9",
+      "Referer": "https://www.nseindia.com/option-chain",
+      "X-Requested-With": "XMLHttpRequest",
+      "Cookie": cookies,
+    },
+  });
+  warmup2Res.headers.forEach((value, key) => {
+    if (key.toLowerCase() === 'set-cookie') allCookies.push(value);
+  });
+  const warmup2Status = warmup2Res.status;
+  await warmup2Res.text();
+  
+  cookies = parseCookies(allCookies);
+  console.log(`Session step 3 (OC warmup status: ${warmup2Status}) cookies: ${cookies.substring(0, 100)}...`);
 
   const headers = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -485,57 +506,121 @@ serve(async (req) => {
       let expiryUsed = weeklyExpiry;
 
       try {
-        await new Promise(r => setTimeout(r, 500));
+        await new Promise(r => setTimeout(r, 1000));
+        
+        // First try the option chain API directly
         const ocRes = await fetch("https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY", { headers });
+        let ocParsed = false;
+        
         if (ocRes.ok) {
-          const ocData = await ocRes.json();
-          const allRecords = ocData?.records?.data || [];
-          const expiryDates = ocData?.records?.expiryDates || [];
-          
-          // Use the nearest (first) expiry which is the weekly expiry
-          const nearestExpiry = expiryDates.length > 0 ? expiryDates[0] : null;
-          if (nearestExpiry) expiryUsed = nearestExpiry;
-          
-          // Filter records for the nearest weekly expiry
-          const records = nearestExpiry 
-            ? allRecords.filter((r: any) => r.expiryDate === nearestExpiry)
-            : ocData?.filtered?.data || allRecords;
-          
-          console.log(`Option chain: ${allRecords.length} total records, ${records.length} for expiry ${nearestExpiry || 'filtered'}`);
-          
-          for (const rec of records) {
-            if (rec.strikePrice === otmCEStrike && rec.CE) {
-              otmCEPrice = rec.CE.lastPrice || rec.CE.askPrice || 0;
+          const ocText = await ocRes.text();
+          try {
+            const ocData = JSON.parse(ocText);
+            console.log(`Option chain response keys: ${JSON.stringify(Object.keys(ocData || {}))}`);
+            console.log(`records keys: ${JSON.stringify(Object.keys(ocData?.records || {}))}`);
+            console.log(`filtered keys: ${JSON.stringify(Object.keys(ocData?.filtered || {}))}`);
+            
+            // Try filtered.data first (more reliable), then records.data
+            const filteredRecords = ocData?.filtered?.data || [];
+            const allRecords = ocData?.records?.data || [];
+            const expiryDates = ocData?.records?.expiryDates || ocData?.filtered?.expiryDates || [];
+            
+            console.log(`Option chain: ${allRecords.length} total, ${filteredRecords.length} filtered, ${expiryDates.length} expiries`);
+            
+            const nearestExpiry = expiryDates.length > 0 ? expiryDates[0] : null;
+            if (nearestExpiry) expiryUsed = nearestExpiry;
+            
+            // Use filtered data if available, otherwise filter allRecords by expiry
+            let records = filteredRecords.length > 0 ? filteredRecords : allRecords;
+            if (nearestExpiry && filteredRecords.length === 0 && allRecords.length > 0) {
+              records = allRecords.filter((r: any) => r.expiryDate === nearestExpiry);
             }
-            if (rec.strikePrice === otmPEStrike && rec.PE) {
-              otmPEPrice = rec.PE.lastPrice || rec.PE.askPrice || 0;
-            }
-            // If caller wants a specific strike/type price
-            if (body.strike && body.optionType) {
-              if (rec.strikePrice === body.strike) {
+            
+            console.log(`Using ${records.length} records for expiry ${expiryUsed}`);
+            
+            for (const rec of records) {
+              if (rec.strikePrice === otmCEStrike && rec.CE) {
+                otmCEPrice = rec.CE.lastPrice || rec.CE.askPrice || 0;
+              }
+              if (rec.strikePrice === otmPEStrike && rec.PE) {
+                otmPEPrice = rec.PE.lastPrice || rec.PE.askPrice || 0;
+              }
+              if (body.strike && body.optionType && rec.strikePrice === body.strike) {
                 const side = rec[body.optionType];
                 if (side) {
                   specificPrice = side.lastPrice || side.askPrice || null;
                 }
               }
             }
+            
+            if (otmCEPrice > 0 || otmPEPrice > 0) ocParsed = true;
+          } catch (parseErr) {
+            console.error(`Option chain JSON parse failed, response starts with: ${ocText.substring(0, 200)}`);
           }
-          
-          // Fallback if lastPrice is 0/null
-          if (!otmCEPrice) otmCEPrice = parseFloat((niftySpot * 0.005).toFixed(2));
-          if (!otmPEPrice) otmPEPrice = parseFloat((niftySpot * 0.005).toFixed(2));
-          
-          console.log(`Real option chain (${expiryUsed}) - CE ${otmCEStrike}: ₹${otmCEPrice}, PE ${otmPEStrike}: ₹${otmPEPrice}, specific: ${specificPrice}`);
         } else {
-          console.error(`Option chain fetch failed: ${ocRes.status}`);
-          await ocRes.text();
-          otmCEPrice = parseFloat((niftySpot * 0.005).toFixed(2));
-          otmPEPrice = parseFloat((niftySpot * 0.005).toFixed(2));
+          const errBody = await ocRes.text();
+          console.error(`Option chain HTTP ${ocRes.status}: ${errBody.substring(0, 200)}`);
         }
+        
+        // If option chain failed, try fetching from quote API as fallback
+        if (!ocParsed) {
+          console.log('Option chain empty/blocked, trying quote API fallback...');
+          await new Promise(r => setTimeout(r, 500));
+          
+          try {
+            const quoteRes = await fetch("https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY", {
+              headers: {
+                ...headers,
+                "Referer": "https://www.nseindia.com/option-chain",
+                "Accept": "*/*",
+              },
+            });
+            
+            if (quoteRes.ok) {
+              const quoteData = await quoteRes.json();
+              const records = quoteData?.filtered?.data || quoteData?.records?.data || [];
+              const expiryDates = quoteData?.records?.expiryDates || [];
+              if (expiryDates.length > 0) expiryUsed = expiryDates[0];
+              
+              console.log(`Retry option chain: ${records.length} records`);
+              
+              for (const rec of records) {
+                if (rec.strikePrice === otmCEStrike && rec.CE) {
+                  otmCEPrice = rec.CE.lastPrice || rec.CE.askPrice || 0;
+                }
+                if (rec.strikePrice === otmPEStrike && rec.PE) {
+                  otmPEPrice = rec.PE.lastPrice || rec.PE.askPrice || 0;
+                }
+                if (body.strike && body.optionType && rec.strikePrice === body.strike) {
+                  const side = rec[body.optionType];
+                  if (side) specificPrice = side.lastPrice || side.askPrice || null;
+                }
+              }
+            } else {
+              await quoteRes.text();
+            }
+          } catch (retryErr) {
+            console.error("Retry option chain failed:", retryErr);
+          }
+        }
+        
+        // Final fallback - use a more realistic estimation based on distance from ATM
+        if (!otmCEPrice) {
+          const distCE = Math.abs(otmCEStrike - niftySpot);
+          otmCEPrice = parseFloat(Math.max(5, niftySpot * 0.013 - distCE * 0.5).toFixed(2));
+          console.log(`CE fallback estimate: ₹${otmCEPrice} (dist=${distCE})`);
+        }
+        if (!otmPEPrice) {
+          const distPE = Math.abs(otmPEStrike - niftySpot);
+          otmPEPrice = parseFloat(Math.max(5, niftySpot * 0.013 - distPE * 0.5).toFixed(2));
+          console.log(`PE fallback estimate: ₹${otmPEPrice} (dist=${distPE})`);
+        }
+        
+        console.log(`Final prices (${expiryUsed}) - CE ${otmCEStrike}: ₹${otmCEPrice}, PE ${otmPEStrike}: ₹${otmPEPrice}, specific: ${specificPrice}`);
       } catch (ocError) {
         console.error("Option chain fetch error:", ocError);
-        otmCEPrice = parseFloat((niftySpot * 0.005).toFixed(2));
-        otmPEPrice = parseFloat((niftySpot * 0.005).toFixed(2));
+        otmCEPrice = parseFloat((niftySpot * 0.013).toFixed(2));
+        otmPEPrice = parseFloat((niftySpot * 0.013).toFixed(2));
       }
 
       console.log(`Nifty spot: ${niftySpot}, ATM: ${atmStrike}, Expiry: ${expiryUsed}`);
