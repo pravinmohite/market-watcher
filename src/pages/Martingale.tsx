@@ -225,16 +225,16 @@ const Martingale = () => {
           </h2>
           <div className="grid md:grid-cols-2 gap-3 text-sm text-muted-foreground">
             <div className="space-y-2">
-              <p>1️⃣ Buy <strong className="text-foreground">1 lot OTM CE</strong></p>
-              <p>2️⃣ If <span className="text-loss font-medium">-15%</span> → exit, buy <strong className="text-foreground">2 lots OTM PE</strong></p>
-              <p>3️⃣ If <span className="text-loss font-medium">-15%</span> → exit, buy <strong className="text-foreground">4 lots OTM CE</strong></p>
+              <p>1️⃣ Buy <strong className="text-foreground">1 lot OTM CE</strong> (weekly expiry)</p>
+              <p>2️⃣ If <span className="text-loss font-medium">-2%</span> → exit, buy <strong className="text-foreground">2 lots OTM PE</strong></p>
+              <p>3️⃣ If <span className="text-loss font-medium">-2%</span> → exit, buy <strong className="text-foreground">4 lots OTM CE</strong></p>
               <p>4️⃣ Continue flipping & doubling (max 5 rounds)</p>
             </div>
             <div className="space-y-2">
-              <p>🎯 <span className="text-gain font-medium">+20%</span> profit → exit & restart fresh</p>
+              <p>🎯 <span className="text-gain font-medium">+3%</span> profit → exit & restart fresh</p>
               <p>🔄 Auto-restarts after profit or max rounds</p>
               <p>📊 Paper trading only — no real orders</p>
-              <p>⚙️ Lot size: 75 (Nifty)</p>
+              <p>⚙️ Lot size: 75 (Nifty) • Weekly expiry</p>
             </div>
           </div>
         </section>

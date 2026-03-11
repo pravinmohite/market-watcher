@@ -543,7 +543,7 @@ serve(async (req) => {
       return new Response(JSON.stringify({
         success: true,
         niftySpot, atmStrike, otmCEStrike, otmPEStrike, otmCEPrice, otmPEPrice, strikeDiff,
-        specificPrice,
+        specificPrice, expiry: expiryUsed,
       }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
     }
 
