@@ -489,33 +489,38 @@ serve(async (req) => {
 
     const alertStocks = stocks.filter(s => Math.abs(s.changePercent) >= THRESHOLD_PERCENT);
 
-    const today = new Date().toISOString().split('T')[0];
-    const { data: existingAlerts } = await supabase
-      .from('stock_alerts')
-      .select('symbol')
-      .gte('alerted_at', `${today}T00:00:00Z`)
-      .lte('alerted_at', `${today}T23:59:59Z`);
+    let sentAlerts: any[] = [];
 
-    const alertedSymbols = new Set(existingAlerts?.map((a: any) => a.symbol) || []);
-    const newAlerts = alertStocks.filter(s => !alertedSymbols.has(s.symbol));
+    if (botToken && chatId) {
+      const today = new Date().toISOString().split('T')[0];
+      const { data: existingAlerts } = await supabase
+        .from('stock_alerts')
+        .select('symbol')
+        .gte('alerted_at', `${today}T00:00:00Z`)
+        .lte('alerted_at', `${today}T23:59:59Z`);
 
-    const sentAlerts = [];
-    for (const stock of newAlerts) {
-      const sent = await sendTelegramAlert(botToken, chatId, stock);
-      if (sent) {
-        sentAlerts.push({
-          symbol: stock.symbol,
-          name: stock.name,
-          open_price: stock.open,
-          current_price: stock.lastPrice,
-          change_percent: stock.changePercent,
-          direction: stock.changePercent > 0 ? 'up' : 'down',
-        });
+      const alertedSymbols = new Set(existingAlerts?.map((a: any) => a.symbol) || []);
+      const newAlerts = alertStocks.filter(s => !alertedSymbols.has(s.symbol));
+
+      for (const stock of newAlerts) {
+        const sent = await sendTelegramAlert(botToken, chatId, stock);
+        if (sent) {
+          sentAlerts.push({
+            symbol: stock.symbol,
+            name: stock.name,
+            open_price: stock.open,
+            current_price: stock.lastPrice,
+            change_percent: stock.changePercent,
+            direction: stock.changePercent > 0 ? 'up' : 'down',
+          });
+        }
       }
-    }
 
-    if (sentAlerts.length > 0) {
-      await supabase.from('stock_alerts').insert(sentAlerts);
+      if (sentAlerts.length > 0) {
+        await supabase.from('stock_alerts').insert(sentAlerts);
+      }
+    } else {
+      console.log('Telegram not configured, skipping alerts');
     }
 
     return new Response(JSON.stringify({
@@ -525,6 +530,7 @@ serve(async (req) => {
       new_alerts_sent: sentAlerts.length,
       all_stocks: stocks,
       alert_stocks: alertStocks,
+      telegram_configured: !!(botToken && chatId),
     }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
