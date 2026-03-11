@@ -90,7 +90,7 @@ const Martingale = () => {
             </div>
             <div>
               <h1 className="text-lg font-bold text-foreground tracking-tight">Martingale Bot</h1>
-              <p className="text-xs text-muted-foreground">Paper Trading • Nifty Options • Doubling Strategy</p>
+              <p className="text-xs text-muted-foreground">Paper Trading • Nifty Weekly Options • Doubling Strategy</p>
             </div>
           </div>
           <div className="flex items-center gap-2">
@@ -142,11 +142,12 @@ const Martingale = () => {
 
         {/* Market Data */}
         {optionData && (
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
             <MartingaleStatCard icon={<Activity className="w-4 h-4" />} label="Nifty Spot" value={`₹${optionData.niftySpot?.toFixed(0)}`} />
             <MartingaleStatCard icon={<TrendingUp className="w-4 h-4" />} label="OTM CE" value={`${optionData.otmCEStrike} @ ₹${optionData.otmCEPrice?.toFixed(1)}`} />
             <MartingaleStatCard icon={<TrendingDown className="w-4 h-4" />} label="OTM PE" value={`${optionData.otmPEStrike} @ ₹${optionData.otmPEPrice?.toFixed(1)}`} />
             <MartingaleStatCard icon={<ArrowLeftRight className="w-4 h-4" />} label="ATM Strike" value={optionData.atmStrike?.toString()} />
+            <MartingaleStatCard icon={<Zap className="w-4 h-4" />} label="Weekly Expiry" value={optionData.expiry || '—'} />
           </div>
         )}
 
@@ -195,18 +196,18 @@ const Martingale = () => {
               {currentPnl !== null && (
                 <div className="mt-3">
                   <div className="flex justify-between text-xs text-muted-foreground mb-1">
-                    <span>-15% (Exit)</span>
+                    <span>-2% (Exit)</span>
                     <span>0%</span>
-                    <span>+20% (Target)</span>
+                    <span>+3% (Target)</span>
                   </div>
                   <div className="h-2 bg-muted rounded-full relative overflow-hidden">
                     <div
                       className={cn("absolute h-full rounded-full transition-all", currentPnl >= 0 ? "bg-gain" : "bg-loss")}
                       style={{
-                        left: currentPnl >= 0 ? '42.8%' : `${Math.max(0, 42.8 + (currentPnl / 15) * 42.8)}%`,
+                        left: currentPnl >= 0 ? '40%' : `${Math.max(0, 40 + (currentPnl / 2) * 40)}%`,
                         width: currentPnl >= 0
-                          ? `${Math.min((currentPnl / 20) * 57.2, 57.2)}%`
-                          : `${Math.min(Math.abs(currentPnl / 15) * 42.8, 42.8)}%`,
+                          ? `${Math.min((currentPnl / 3) * 60, 60)}%`
+                          : `${Math.min(Math.abs(currentPnl / 2) * 40, 40)}%`,
                       }}
                     />
                   </div>
@@ -224,16 +225,16 @@ const Martingale = () => {
           </h2>
           <div className="grid md:grid-cols-2 gap-3 text-sm text-muted-foreground">
             <div className="space-y-2">
-              <p>1️⃣ Buy <strong className="text-foreground">1 lot OTM CE</strong></p>
-              <p>2️⃣ If <span className="text-loss font-medium">-15%</span> → exit, buy <strong className="text-foreground">2 lots OTM PE</strong></p>
-              <p>3️⃣ If <span className="text-loss font-medium">-15%</span> → exit, buy <strong className="text-foreground">4 lots OTM CE</strong></p>
+              <p>1️⃣ Buy <strong className="text-foreground">1 lot OTM CE</strong> (weekly expiry)</p>
+              <p>2️⃣ If <span className="text-loss font-medium">-2%</span> → exit, buy <strong className="text-foreground">2 lots OTM PE</strong></p>
+              <p>3️⃣ If <span className="text-loss font-medium">-2%</span> → exit, buy <strong className="text-foreground">4 lots OTM CE</strong></p>
               <p>4️⃣ Continue flipping & doubling (max 5 rounds)</p>
             </div>
             <div className="space-y-2">
-              <p>🎯 <span className="text-gain font-medium">+20%</span> profit → exit & restart fresh</p>
+              <p>🎯 <span className="text-gain font-medium">+3%</span> profit → exit & restart fresh</p>
               <p>🔄 Auto-restarts after profit or max rounds</p>
               <p>📊 Paper trading only — no real orders</p>
-              <p>⚙️ Lot size: 75 (Nifty)</p>
+              <p>⚙️ Lot size: 75 (Nifty) • Weekly expiry</p>
             </div>
           </div>
         </section>
