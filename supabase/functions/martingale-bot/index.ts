@@ -19,6 +19,7 @@ interface OptionChainData {
   otmCEPrice: number;
   otmPEPrice: number;
   strikeDiff: number;
+  source?: string;
 }
 
 async function fetchNiftyOptionChain(supabaseUrl: string, anonKey: string, strike?: number, optionType?: string, entrySpot?: number, entryPrice?: number): Promise<{ optionData: OptionChainData | null; specificPrice: number | null }> {
@@ -38,7 +39,7 @@ async function fetchNiftyOptionChain(supabaseUrl: string, anonKey: string, strik
     const data = await res.json();
     if (!data.success) { console.error(`Proxy error: ${data.error}`); return { optionData: null, specificPrice: null }; }
     return {
-      optionData: { niftySpot: data.niftySpot, atmStrike: data.atmStrike, otmCEStrike: data.otmCEStrike, otmPEStrike: data.otmPEStrike, otmCEPrice: data.otmCEPrice, otmPEPrice: data.otmPEPrice, strikeDiff: data.strikeDiff },
+      optionData: { niftySpot: data.niftySpot, atmStrike: data.atmStrike, otmCEStrike: data.otmCEStrike, otmPEStrike: data.otmPEStrike, otmCEPrice: data.otmCEPrice, otmPEPrice: data.otmPEPrice, strikeDiff: data.strikeDiff, source: data.source },
       specificPrice: data.specificPrice,
     };
   } catch (error) { console.error("Option chain error:", error); return { optionData: null, specificPrice: null }; }
@@ -191,6 +192,13 @@ serve(async (req) => {
         .single();
       if (sessErr) throw sessErr;
 
+      // Don't enter trade if price is 0
+      if (optionData.otmCEPrice <= 0) {
+        return new Response(JSON.stringify({ success: false, message: `Cannot start: option price is ₹0. Upstox may not be returning data. Source: ${optionData.source || 'unknown'}` }), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+
       const { error: tradeErr } = await supabase
         .from('martingale_trades')
         .insert({
@@ -249,7 +257,7 @@ serve(async (req) => {
 
     async function startNewSession() {
       const { optionData } = await fetchNiftyOptionChain(supabaseUrl, anonKey);
-      if (optionData) {
+      if (optionData && optionData.otmCEPrice > 0) {
         const { data: newSession } = await supabase
           .from('martingale_sessions')
           .insert({ status: 'active', current_round: 1, max_rounds: MAX_ROUNDS })
@@ -261,6 +269,8 @@ serve(async (req) => {
             entry_price: optionData.otmCEPrice, status: 'open', nifty_spot: optionData.niftySpot,
           });
         }
+      } else {
+        console.log('Cannot start new session: option price is 0 or unavailable');
       }
     }
 
@@ -320,6 +330,12 @@ serve(async (req) => {
 
         const newStrike = newOptionType === 'CE' ? optionData.otmCEStrike : optionData.otmPEStrike;
         const newPrice = newOptionType === 'CE' ? optionData.otmCEPrice : optionData.otmPEPrice;
+
+        if (newPrice <= 0) {
+          return new Response(JSON.stringify({ success: false, message: `Cannot enter round ${newRound}: option price is ₹0` }), {
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
 
         await supabase.from('martingale_sessions').update({
           current_round: newRound, total_pnl: newTotalPnl,
