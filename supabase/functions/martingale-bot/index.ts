@@ -331,6 +331,12 @@ serve(async (req) => {
         const newStrike = newOptionType === 'CE' ? optionData.otmCEStrike : optionData.otmPEStrike;
         const newPrice = newOptionType === 'CE' ? optionData.otmCEPrice : optionData.otmPEPrice;
 
+        if (newPrice <= 0) {
+          return new Response(JSON.stringify({ success: false, message: `Cannot enter round ${newRound}: option price is ₹0` }), {
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
+
         await supabase.from('martingale_sessions').update({
           current_round: newRound, total_pnl: newTotalPnl,
         }).eq('id', activeSession.id);
