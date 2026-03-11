@@ -420,6 +420,9 @@ const Martingale = () => {
           )}
         </section>
 
+        {/* Date-wise P&L Summary */}
+        <DateWisePnL sessions={recentSessions} allTrades={allTrades} />
+
         {/* Session History */}
         {recentSessions.length > 0 && (
           <section>
@@ -432,9 +435,10 @@ const Martingale = () => {
                       "px-2 py-0.5 rounded-full text-xs font-medium",
                       session.status === 'active' ? "bg-primary/15 text-primary" :
                       session.status === 'completed' ? "bg-gain/15 text-gain" :
+                      session.status === 'squared_off' ? "bg-warning/15 text-warning" :
                       "bg-muted text-muted-foreground"
                     )}>
-                      {session.status}
+                      {session.status === 'squared_off' ? '3:29 exit' : session.status}
                     </span>
                     <span className="text-xs text-muted-foreground">
                       Rounds: {session.current_round}/{session.max_rounds}
