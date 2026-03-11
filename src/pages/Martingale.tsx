@@ -398,6 +398,8 @@ const Martingale = () => {
                         </span>
                       </td>
                       <td className="p-3 text-right font-mono text-foreground">{trade.lots}</td>
+                      <td className="p-3 text-right font-mono text-foreground">{trade.lots * 65}</td>
+                      <td className="p-3 text-right font-mono text-foreground">₹{(trade.lots * 65 * Number(trade.entry_price)).toFixed(0)}</td>
                       <td className="p-3 text-right font-mono text-foreground">₹{Number(trade.entry_price).toFixed(1)}</td>
                       <td className="p-3 text-right font-mono text-foreground">
                         {trade.exit_price ? `₹${Number(trade.exit_price).toFixed(1)}` : '—'}

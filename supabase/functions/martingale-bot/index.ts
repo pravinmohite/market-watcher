@@ -6,7 +6,7 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version',
 };
 
-const LOT_SIZE = 75;
+const LOT_SIZE = 65;
 const PROFIT_TARGET = 3;
 const LOSS_LIMIT = 2;
 const MAX_ROUNDS = 5;
