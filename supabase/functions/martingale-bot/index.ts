@@ -257,7 +257,7 @@ serve(async (req) => {
 
     async function startNewSession() {
       const { optionData } = await fetchNiftyOptionChain(supabaseUrl, anonKey);
-      if (optionData) {
+      if (optionData && optionData.otmCEPrice > 0) {
         const { data: newSession } = await supabase
           .from('martingale_sessions')
           .insert({ status: 'active', current_round: 1, max_rounds: MAX_ROUNDS })
@@ -269,6 +269,8 @@ serve(async (req) => {
             entry_price: optionData.otmCEPrice, status: 'open', nifty_spot: optionData.niftySpot,
           });
         }
+      } else {
+        console.log('Cannot start new session: option price is 0 or unavailable');
       }
     }
 
