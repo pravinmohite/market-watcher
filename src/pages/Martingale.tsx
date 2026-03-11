@@ -1,7 +1,7 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
-import { Play, Square, RefreshCw, Zap, TrendingUp, TrendingDown, ArrowLeftRight, AlertTriangle, DollarSign, Activity, ArrowLeft, Link2, Unlink } from "lucide-react";
+import { Play, Square, RefreshCw, Zap, TrendingUp, TrendingDown, ArrowLeftRight, AlertTriangle, DollarSign, Activity, ArrowLeft, Link2, Unlink, Calendar } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
@@ -349,6 +349,7 @@ const Martingale = () => {
             <div className="space-y-2">
               <p>🎯 <span className="text-gain font-medium">+3%</span> profit → exit & restart fresh</p>
               <p>🔄 Auto-restarts after profit or max rounds</p>
+              <p>🕒 Auto square-off at <strong className="text-foreground">3:29 PM</strong></p>
               <p>📊 Paper trading only — no real orders</p>
               <p>⚙️ Lot size: 75 (Nifty) • Weekly expiry</p>
             </div>
@@ -419,6 +420,9 @@ const Martingale = () => {
           )}
         </section>
 
+        {/* Date-wise P&L Summary */}
+        <DateWisePnL sessions={recentSessions} allTrades={allTrades} />
+
         {/* Session History */}
         {recentSessions.length > 0 && (
           <section>
@@ -431,9 +435,10 @@ const Martingale = () => {
                       "px-2 py-0.5 rounded-full text-xs font-medium",
                       session.status === 'active' ? "bg-primary/15 text-primary" :
                       session.status === 'completed' ? "bg-gain/15 text-gain" :
+                      session.status === 'squared_off' ? "bg-warning/15 text-warning" :
                       "bg-muted text-muted-foreground"
                     )}>
-                      {session.status}
+                      {session.status === 'squared_off' ? '3:29 exit' : session.status}
                     </span>
                     <span className="text-xs text-muted-foreground">
                       Rounds: {session.current_round}/{session.max_rounds}
@@ -456,6 +461,87 @@ const Martingale = () => {
         )}
       </main>
     </div>
+  );
+};
+
+const DateWisePnL = ({ sessions, allTrades }: { sessions: any[]; allTrades: any[] }) => {
+  const dateData = useMemo(() => {
+    const byDate: Record<string, { pnl: number; trades: number; sessions: number }> = {};
+    
+    for (const session of sessions) {
+      if (session.status === 'active') continue;
+      const date = new Date(session.created_at).toLocaleDateString('en-IN', { year: 'numeric', month: 'short', day: '2-digit' });
+      if (!byDate[date]) byDate[date] = { pnl: 0, trades: 0, sessions: 0 };
+      byDate[date].pnl += Number(session.total_pnl);
+      byDate[date].sessions += 1;
+    }
+    
+    for (const trade of allTrades) {
+      if (trade.status !== 'closed') continue;
+      const date = new Date(trade.entry_time).toLocaleDateString('en-IN', { year: 'numeric', month: 'short', day: '2-digit' });
+      if (!byDate[date]) byDate[date] = { pnl: 0, trades: 0, sessions: 0 };
+      byDate[date].trades += 1;
+    }
+    
+    return Object.entries(byDate)
+      .sort(([a], [b]) => new Date(b).getTime() - new Date(a).getTime());
+  }, [sessions, allTrades]);
+
+  if (dateData.length === 0) return null;
+
+  const totalPnl = dateData.reduce((sum, [, d]) => sum + d.pnl, 0);
+  const winDays = dateData.filter(([, d]) => d.pnl > 0).length;
+  const lossDays = dateData.filter(([, d]) => d.pnl < 0).length;
+
+  return (
+    <section>
+      <h2 className="text-base font-semibold text-foreground mb-3 flex items-center gap-2">
+        <Calendar className="w-4 h-4 text-primary" />
+        Date-wise P&L
+      </h2>
+      {/* Summary */}
+      <div className="grid grid-cols-3 gap-3 mb-3">
+        <div className="rounded-xl border border-border bg-card p-3 text-center">
+          <p className="text-xs text-muted-foreground">Total P&L</p>
+          <p className={cn("text-lg font-bold font-mono", totalPnl >= 0 ? "text-gain" : "text-loss")}>
+            ₹{totalPnl.toFixed(0)}
+          </p>
+        </div>
+        <div className="rounded-xl border border-border bg-card p-3 text-center">
+          <p className="text-xs text-muted-foreground">Win Days</p>
+          <p className="text-lg font-bold font-mono text-gain">{winDays}</p>
+        </div>
+        <div className="rounded-xl border border-border bg-card p-3 text-center">
+          <p className="text-xs text-muted-foreground">Loss Days</p>
+          <p className="text-lg font-bold font-mono text-loss">{lossDays}</p>
+        </div>
+      </div>
+      {/* Daily breakdown */}
+      <div className="overflow-x-auto rounded-xl border border-border">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b border-border bg-muted/50">
+              <th className="text-left p-3 text-muted-foreground font-medium">Date</th>
+              <th className="text-right p-3 text-muted-foreground font-medium">Sessions</th>
+              <th className="text-right p-3 text-muted-foreground font-medium">Trades</th>
+              <th className="text-right p-3 text-muted-foreground font-medium">P&L</th>
+            </tr>
+          </thead>
+          <tbody>
+            {dateData.map(([date, d]) => (
+              <tr key={date} className="border-b border-border/50 hover:bg-muted/30 transition-colors">
+                <td className="p-3 font-mono text-foreground">{date}</td>
+                <td className="p-3 text-right font-mono text-muted-foreground">{d.sessions}</td>
+                <td className="p-3 text-right font-mono text-muted-foreground">{d.trades}</td>
+                <td className={cn("p-3 text-right font-mono font-medium", d.pnl >= 0 ? "text-gain" : "text-loss")}>
+                  ₹{d.pnl.toFixed(0)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
   );
 };
 
