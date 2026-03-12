@@ -354,10 +354,15 @@ serve(async (req) => {
 
     // Check profit target
     if (pnlPercent >= PROFIT_TARGET) {
-      await supabase.from('martingale_trades').update({
+      // Race condition guard: only close if still open
+      const { data: closeResult } = await supabase.from('martingale_trades').update({
         status: 'closed', exit_price: currentPrice, pnl: pnlAmount, exit_time: new Date().toISOString(),
-      }).eq('id', openTrade.id);
-
+      }).eq('id', openTrade.id).eq('status', 'open').select();
+      if (!closeResult || closeResult.length === 0) {
+        return new Response(JSON.stringify({ success: true, message: 'Trade already processed by another tick' }), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
       await supabase.from('martingale_sessions').update({
         status: 'completed', total_pnl: activeSession.total_pnl + pnlAmount, completed_at: new Date().toISOString(),
       }).eq('id', activeSession.id);
