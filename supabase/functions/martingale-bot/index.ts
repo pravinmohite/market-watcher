@@ -348,7 +348,7 @@ serve(async (req) => {
       }
 
       return new Response(JSON.stringify({
-        success: true, action: `🕒 3:29 PM Square Off! Exited ${openTrade.option_type} ${openTrade.strike_price} @ ₹${exitPrice} (P&L: ₹${sqPnl.toFixed(0)})`,
+        success: true, action: `🕒 3:25 PM Square Off! Exited ${openTrade.option_type} ${openTrade.strike_price} @ ₹${exitPrice} (P&L: ₹${sqPnl.toFixed(0)})`,
       }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
     }
 
