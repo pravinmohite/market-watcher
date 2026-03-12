@@ -324,7 +324,7 @@ const Martingale = () => {
                       style={{
                         left: currentPnl >= 0 ? '40%' : `${Math.max(0, 40 + (currentPnl / 2) * 40)}%`,
                         width: currentPnl >= 0
-                          ? `${Math.min((currentPnl / 3) * 60, 60)}%`
+                          ? `${Math.min((currentPnl / 2.5) * 60, 60)}%`
                           : `${Math.min(Math.abs(currentPnl / 2) * 40, 40)}%`,
                       }}
                     />
