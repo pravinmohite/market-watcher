@@ -337,7 +337,7 @@ serve(async (req) => {
         status: 'squared_off', total_pnl: activeSession.total_pnl + sqPnl, completed_at: new Date().toISOString(),
       }).eq('id', activeSession.id);
 
-      const msg = `🕒 *3:29 PM Square Off*\nExited ${openTrade.option_type} ${openTrade.strike_price} @ ₹${exitPrice} (P&L: ₹${sqPnl.toFixed(0)})`;
+      const msg = `🕒 *3:25 PM Square Off*\nExited ${openTrade.option_type} ${openTrade.strike_price} @ ₹${exitPrice} (P&L: ₹${sqPnl.toFixed(0)})`;
       const botToken = Deno.env.get('TELEGRAM_BOT_TOKEN');
       const chatId = Deno.env.get('TELEGRAM_CHAT_ID');
       if (botToken && chatId) {
@@ -348,7 +348,7 @@ serve(async (req) => {
       }
 
       return new Response(JSON.stringify({
-        success: true, action: `🕒 3:29 PM Square Off! Exited ${openTrade.option_type} ${openTrade.strike_price} @ ₹${exitPrice} (P&L: ₹${sqPnl.toFixed(0)})`,
+        success: true, action: `🕒 3:25 PM Square Off! Exited ${openTrade.option_type} ${openTrade.strike_price} @ ₹${exitPrice} (P&L: ₹${sqPnl.toFixed(0)})`,
       }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
     }
 

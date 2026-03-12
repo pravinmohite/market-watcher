@@ -350,7 +350,7 @@ const Martingale = () => {
             <div className="space-y-2">
               <p>🎯 <span className="text-gain font-medium">+2.5%</span> profit → exit & restart fresh</p>
               <p>🔄 Auto-restarts after profit or max rounds</p>
-              <p>🕒 Auto square-off at <strong className="text-foreground">3:29 PM</strong></p>
+              <p>🕒 Auto square-off at <strong className="text-foreground">3:25 PM</strong></p>
               <p>📊 Paper trading only — no real orders</p>
               <p>⚙️ Lot size: 65 (Nifty) • Weekly expiry</p>
             </div>
@@ -443,7 +443,7 @@ const Martingale = () => {
                       session.status === 'squared_off' ? "bg-warning/15 text-warning" :
                       "bg-muted text-muted-foreground"
                     )}>
-                      {session.status === 'squared_off' ? '3:29 exit' : session.status}
+                      {session.status === 'squared_off' ? '3:25 exit' : session.status}
                     </span>
                     <span className="text-xs text-muted-foreground">
                       Rounds: {session.current_round}/{session.max_rounds}
