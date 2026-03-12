@@ -320,7 +320,7 @@ serve(async (req) => {
     const nowIST = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
     const istHour = nowIST.getHours();
     const istMinute = nowIST.getMinutes();
-    const isPastSquareOff = istHour > 15 || (istHour === 15 && istMinute >= 29);
+    const isPastSquareOff = istHour > 15 || (istHour === 15 && istMinute >= 25);
 
     if (isPastSquareOff && openTrade) {
       const { specificPrice: sqPrice } = await fetchNiftyOptionChain(
