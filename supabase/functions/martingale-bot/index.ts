@@ -366,22 +366,34 @@ serve(async (req) => {
     const pnlAmount = (currentPrice - openTrade.entry_price) * openTrade.lots * LOT_SIZE;
     let actionTaken = `Monitoring: ${openTrade.option_type} ${openTrade.strike_price} @ ₹${currentPrice} (${pnlPercent.toFixed(2)}%)`;
 
-    async function startNewSession() {
+    async function startNewSession(lastOptionType: string, lastPnl: number) {
       const { optionData } = await fetchNiftyOptionChain(supabaseUrl, anonKey);
-      if (optionData && optionData.otmCEPrice > 0) {
-        const { data: newSession } = await supabase
-          .from('martingale_sessions')
-          .insert({ status: 'active', current_round: 1, max_rounds: MAX_ROUNDS })
-          .select().single();
-        if (newSession) {
-          await supabase.from('martingale_trades').insert({
-            session_id: newSession.id, round: 1, option_type: 'CE',
-            strike_price: optionData.otmCEStrike, lots: 1,
-            entry_price: optionData.otmCEPrice, status: 'open', nifty_spot: optionData.niftySpot,
-          });
-        }
+      if (!optionData) { console.log('Cannot start new session: no option data'); return; }
+
+      // Smart direction: if last trade profitable → keep direction; if loss → flip
+      let newDirection: string;
+      if (lastPnl > 0) {
+        newDirection = lastOptionType; // keep winning direction
       } else {
-        console.log('Cannot start new session: option price is 0 or unavailable');
+        newDirection = lastOptionType === 'CE' ? 'PE' : 'CE'; // flip on loss
+      }
+
+      const newStrike = newDirection === 'CE' ? optionData.otmCEStrike : optionData.otmPEStrike;
+      const newPrice = newDirection === 'CE' ? optionData.otmCEPrice : optionData.otmPEPrice;
+
+      if (newPrice <= 0) { console.log(`Cannot start new session: ${newDirection} price is 0`); return; }
+
+      const { data: newSession } = await supabase
+        .from('martingale_sessions')
+        .insert({ status: 'active', current_round: 1, max_rounds: MAX_ROUNDS })
+        .select().single();
+      if (newSession) {
+        await supabase.from('martingale_trades').insert({
+          session_id: newSession.id, round: 1, option_type: newDirection,
+          strike_price: newStrike, lots: 1,
+          entry_price: newPrice, status: 'open', nifty_spot: optionData.niftySpot,
+        });
+        console.log(`New session: ${newDirection} ${newStrike} @ ₹${newPrice} (lastPnl=${lastPnl.toFixed(0)})`);
       }
     }
 
