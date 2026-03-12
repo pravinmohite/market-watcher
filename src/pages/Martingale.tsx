@@ -316,7 +316,7 @@ const Martingale = () => {
                   <div className="flex justify-between text-xs text-muted-foreground mb-1">
                     <span>-2% (Exit)</span>
                     <span>0%</span>
-                    <span>+3% (Target)</span>
+                    <span>+2.5% (Target)</span>
                   </div>
                   <div className="h-2 bg-muted rounded-full relative overflow-hidden">
                     <div
