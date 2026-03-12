@@ -424,7 +424,7 @@ serve(async (req) => {
         status: 'completed', total_pnl: activeSession.total_pnl + pnlAmount, completed_at: new Date().toISOString(),
       }).eq('id', activeSession.id);
 
-      await startNewSession();
+      await startNewSession(openTrade.option_type, pnlAmount);
       actionTaken = `🎯 PROFIT! Exited ${openTrade.option_type} ${openTrade.strike_price} @ ₹${currentPrice} (+${pnlPercent.toFixed(1)}%, ₹${pnlAmount.toFixed(0)}). New session started.`;
       await sendTelegram(`🎯 *Martingale Bot - PROFIT*\n\n${actionTaken}`);
     }
