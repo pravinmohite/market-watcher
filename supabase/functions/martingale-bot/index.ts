@@ -200,6 +200,52 @@ serve(async (req) => {
         });
       }
 
+      // Determine entry direction:
+      // 1. Check last completed session's last profitable trade direction
+      // 2. If last trade was profitable → keep same direction; if loss → flip
+      // 3. Fallback (first session ever): trend-based (spot vs open proxy)
+      let entryOptionType = 'CE'; // default
+
+      const { data: lastSession } = await supabase
+        .from('martingale_sessions')
+        .select('id, status')
+        .neq('status', 'active')
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (lastSession) {
+        // Get the last trade of the previous session
+        const { data: lastTrade } = await supabase
+          .from('martingale_trades')
+          .select('option_type, pnl')
+          .eq('session_id', lastSession.id)
+          .order('entry_time', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        if (lastTrade) {
+          if (lastTrade.pnl !== null && lastTrade.pnl > 0) {
+            // Last trade was profitable → keep same direction
+            entryOptionType = lastTrade.option_type;
+          } else {
+            // Last trade was a loss → flip direction
+            entryOptionType = lastTrade.option_type === 'CE' ? 'PE' : 'CE';
+          }
+          console.log(`Direction from last session: lastTrade=${lastTrade.option_type}, pnl=${lastTrade.pnl}, chosen=${entryOptionType}`);
+        }
+      } else {
+        // First session ever: trend-based entry
+        // If nifty spot > ATM strike → bullish → CE, else PE
+        if (optionData.niftySpot < optionData.atmStrike) {
+          entryOptionType = 'PE';
+        }
+        console.log(`First session, trend-based: spot=${optionData.niftySpot}, atm=${optionData.atmStrike}, chosen=${entryOptionType}`);
+      }
+
+      const entryStrike = entryOptionType === 'CE' ? optionData.otmCEStrike : optionData.otmPEStrike;
+      const entryPrice = entryOptionType === 'CE' ? optionData.otmCEPrice : optionData.otmPEPrice;
+
       const { data: session, error: sessErr } = await supabase
         .from('martingale_sessions')
         .insert({ status: 'active', current_round: 1, max_rounds: MAX_ROUNDS })
@@ -207,9 +253,8 @@ serve(async (req) => {
         .single();
       if (sessErr) throw sessErr;
 
-      // Don't enter trade if price is 0
-      if (optionData.otmCEPrice <= 0) {
-        return new Response(JSON.stringify({ success: false, message: `Cannot start: option price is ₹0. Upstox may not be returning data. Source: ${optionData.source || 'unknown'}` }), {
+      if (entryPrice <= 0) {
+        return new Response(JSON.stringify({ success: false, message: `Cannot start: ${entryOptionType} option price is ₹0. Source: ${optionData.source || 'unknown'}` }), {
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         });
       }
@@ -217,15 +262,15 @@ serve(async (req) => {
       const { error: tradeErr } = await supabase
         .from('martingale_trades')
         .insert({
-          session_id: session.id, round: 1, option_type: 'CE',
-          strike_price: optionData.otmCEStrike, lots: 1,
-          entry_price: optionData.otmCEPrice, status: 'open', nifty_spot: optionData.niftySpot,
+          session_id: session.id, round: 1, option_type: entryOptionType,
+          strike_price: entryStrike, lots: 1,
+          entry_price: entryPrice, status: 'open', nifty_spot: optionData.niftySpot,
         });
       if (tradeErr) throw tradeErr;
 
       return new Response(JSON.stringify({
         success: true,
-        message: `Started! Bought 1 lot ${optionData.otmCEStrike} CE @ ₹${optionData.otmCEPrice}`,
+        message: `Started! Bought 1 lot ${entryStrike} ${entryOptionType} @ ₹${entryPrice}`,
         session,
       }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
     }
