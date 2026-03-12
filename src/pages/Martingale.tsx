@@ -443,7 +443,7 @@ const Martingale = () => {
                       session.status === 'squared_off' ? "bg-warning/15 text-warning" :
                       "bg-muted text-muted-foreground"
                     )}>
-                      {session.status === 'squared_off' ? '3:29 exit' : session.status}
+                      {session.status === 'squared_off' ? '3:25 exit' : session.status}
                     </span>
                     <span className="text-xs text-muted-foreground">
                       Rounds: {session.current_round}/{session.max_rounds}
