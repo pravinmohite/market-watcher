@@ -7,7 +7,7 @@ const corsHeaders = {
 };
 
 const LOT_SIZE = 65;
-const PROFIT_TARGET = 3;
+const PROFIT_TARGET = 2.5;
 const LOSS_LIMIT = 2;
 const MAX_ROUNDS = 5;
 
