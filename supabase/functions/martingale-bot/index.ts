@@ -449,7 +449,7 @@ serve(async (req) => {
         }).eq('id', activeSession.id);
 
         actionTaken = `⛔ MAX ROUNDS (${MAX_ROUNDS}) reached. Session P&L: ₹${newTotalPnl.toFixed(0)}. Starting fresh.`;
-        await startNewSession();
+        await startNewSession(openTrade.option_type, pnlAmount);
       } else {
         const newOptionType = openTrade.option_type === 'CE' ? 'PE' : 'CE';
         const newLots = openTrade.lots * 2;
