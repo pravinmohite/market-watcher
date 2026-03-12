@@ -373,10 +373,15 @@ serve(async (req) => {
     }
     // Check loss limit
     else if (pnlPercent <= -LOSS_LIMIT) {
-      await supabase.from('martingale_trades').update({
+      // Race condition guard: only close if still open
+      const { data: closeResult } = await supabase.from('martingale_trades').update({
         status: 'closed', exit_price: currentPrice, pnl: pnlAmount, exit_time: new Date().toISOString(),
-      }).eq('id', openTrade.id);
-
+      }).eq('id', openTrade.id).eq('status', 'open').select();
+      if (!closeResult || closeResult.length === 0) {
+        return new Response(JSON.stringify({ success: true, message: 'Trade already processed by another tick' }), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
       const newRound = activeSession.current_round + 1;
       const newTotalPnl = activeSession.total_pnl + pnlAmount;
 
