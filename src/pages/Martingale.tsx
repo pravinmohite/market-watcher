@@ -316,7 +316,7 @@ const Martingale = () => {
                   <div className="flex justify-between text-xs text-muted-foreground mb-1">
                     <span>-2% (Exit)</span>
                     <span>0%</span>
-                    <span>+3% (Target)</span>
+                    <span>+2.5% (Target)</span>
                   </div>
                   <div className="h-2 bg-muted rounded-full relative overflow-hidden">
                     <div
@@ -324,7 +324,7 @@ const Martingale = () => {
                       style={{
                         left: currentPnl >= 0 ? '40%' : `${Math.max(0, 40 + (currentPnl / 2) * 40)}%`,
                         width: currentPnl >= 0
-                          ? `${Math.min((currentPnl / 3) * 60, 60)}%`
+                          ? `${Math.min((currentPnl / 2.5) * 60, 60)}%`
                           : `${Math.min(Math.abs(currentPnl / 2) * 40, 40)}%`,
                       }}
                     />
@@ -343,13 +343,12 @@ const Martingale = () => {
           </h2>
           <div className="grid md:grid-cols-2 gap-3 text-sm text-muted-foreground">
             <div className="space-y-2">
-              <p>1️⃣ Buy <strong className="text-foreground">1 lot OTM CE</strong> (weekly expiry)</p>
-              <p>2️⃣ If <span className="text-loss font-medium">-2%</span> → exit, buy <strong className="text-foreground">2 lots OTM PE</strong></p>
-              <p>3️⃣ If <span className="text-loss font-medium">-2%</span> → exit, buy <strong className="text-foreground">4 lots OTM CE</strong></p>
-              <p>4️⃣ Continue flipping & doubling (max 5 rounds)</p>
+              <p>1️⃣ Smart entry: <strong className="text-foreground">follows last winning direction</strong> (trend-based for first session)</p>
+              <p>2️⃣ If <span className="text-loss font-medium">-2%</span> → exit, <strong className="text-foreground">flip direction & double lots</strong></p>
+              <p>3️⃣ Continue flipping & doubling (max 5 rounds)</p>
             </div>
             <div className="space-y-2">
-              <p>🎯 <span className="text-gain font-medium">+3%</span> profit → exit & restart fresh</p>
+              <p>🎯 <span className="text-gain font-medium">+2.5%</span> profit → exit & restart fresh</p>
               <p>🔄 Auto-restarts after profit or max rounds</p>
               <p>🕒 Auto square-off at <strong className="text-foreground">3:29 PM</strong></p>
               <p>📊 Paper trading only — no real orders</p>
