@@ -357,15 +357,23 @@ const Martingale = () => {
           </div>
         </section>
 
-        {/* Trade History */}
+        {/* Date-wise P&L Summary (all days) - moved above trade history */}
+        <DateWisePnL sessions={recentSessions} allTrades={allTrades} />
+
+        {/* Trade History - last 2 days only */}
         <section>
           <h2 className="text-base font-semibold text-foreground mb-3 flex items-center gap-2">
             <Activity className="w-4 h-4 text-primary" />
-            Trade History
+            Trade History <span className="text-xs font-normal text-muted-foreground">(Last 2 days)</span>
           </h2>
-          {allTrades.length === 0 ? (
-            <p className="text-sm text-muted-foreground">No trades yet. Start the bot to begin.</p>
-          ) : (
+          {(() => {
+            const twoDaysAgo = new Date();
+            twoDaysAgo.setDate(twoDaysAgo.getDate() - 2);
+            twoDaysAgo.setHours(0, 0, 0, 0);
+            const recentTrades = allTrades.filter((t: any) => new Date(t.entry_time) >= twoDaysAgo);
+            return recentTrades.length === 0 ? (
+              <p className="text-sm text-muted-foreground">No trades in the last 2 days.</p>
+            ) : (
             <div className="overflow-x-auto rounded-xl border border-border">
               <table className="w-full text-sm">
                 <thead>
