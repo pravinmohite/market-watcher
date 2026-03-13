@@ -15,7 +15,6 @@ const Martingale = () => {
   useEffect(() => {
     const code = searchParams.get('code');
     if (code) {
-      // Exchange the code for an access token
       const exchangeCode = async () => {
         try {
           const redirectUri = `${window.location.origin}/martingale`;
@@ -34,14 +33,12 @@ const Martingale = () => {
           toast.error("Failed to exchange Upstox auth code");
           console.error(err);
         }
-        // Clean URL
         setSearchParams({});
       };
       exchangeCode();
     }
   }, [searchParams]);
 
-  // Check Upstox token status
   const { data: upstoxStatus } = useQuery({
     queryKey: ["upstox-status"],
     queryFn: async () => {
@@ -59,7 +56,6 @@ const Martingale = () => {
   const { data, isLoading, refetch } = useQuery({
     queryKey: ["martingale-status"],
     queryFn: async () => {
-      // First trigger a tick to execute any pending trades
       const { data: tickData } = await supabase.functions.invoke("martingale-bot", {
         body: { action: "tick" },
       });
@@ -67,7 +63,6 @@ const Martingale = () => {
         setLastTickAction(tickData.action);
         toast.info(tickData.action);
       }
-      // Then get full status
       const { data: statusData, error } = await supabase.functions.invoke("martingale-bot", {
         body: { action: "status" },
       });
@@ -150,6 +145,24 @@ const Martingale = () => {
   const isActive = activeSession?.status === 'active';
   const isUpstoxConnected = upstoxStatus?.connected;
   const dataSource = optionData?.source;
+
+  // Filter trades and sessions to last 2 days
+  const twoDaysAgo = useMemo(() => {
+    const d = new Date();
+    d.setDate(d.getDate() - 2);
+    d.setHours(0, 0, 0, 0);
+    return d;
+  }, []);
+
+  const recentTrades = useMemo(() => 
+    allTrades.filter((t: any) => new Date(t.entry_time) >= twoDaysAgo),
+    [allTrades, twoDaysAgo]
+  );
+
+  const recentSess = useMemo(() => 
+    recentSessions.filter((s: any) => new Date(s.created_at) >= twoDaysAgo),
+    [recentSessions, twoDaysAgo]
+  );
 
   return (
     <div className="min-h-screen bg-background">
@@ -357,14 +370,17 @@ const Martingale = () => {
           </div>
         </section>
 
-        {/* Trade History */}
+        {/* Date-wise P&L Summary (all days) */}
+        <DateWisePnL sessions={recentSessions} allTrades={allTrades} />
+
+        {/* Trade History (last 2 days) */}
         <section>
           <h2 className="text-base font-semibold text-foreground mb-3 flex items-center gap-2">
             <Activity className="w-4 h-4 text-primary" />
-            Trade History
+            Trade History <span className="text-xs font-normal text-muted-foreground">(Last 2 days)</span>
           </h2>
-          {allTrades.length === 0 ? (
-            <p className="text-sm text-muted-foreground">No trades yet. Start the bot to begin.</p>
+          {recentTrades.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No trades in the last 2 days.</p>
           ) : (
             <div className="overflow-x-auto rounded-xl border border-border">
               <table className="w-full text-sm">
@@ -373,17 +389,17 @@ const Martingale = () => {
                     <th className="text-left p-3 text-muted-foreground font-medium">Time</th>
                     <th className="text-left p-3 text-muted-foreground font-medium">Round</th>
                     <th className="text-left p-3 text-muted-foreground font-medium">Option</th>
-                     <th className="text-right p-3 text-muted-foreground font-medium">Lots</th>
-                     <th className="text-right p-3 text-muted-foreground font-medium">Qty</th>
-                     <th className="text-right p-3 text-muted-foreground font-medium">Capital</th>
-                     <th className="text-right p-3 text-muted-foreground font-medium">Entry</th>
+                    <th className="text-right p-3 text-muted-foreground font-medium">Lots</th>
+                    <th className="text-right p-3 text-muted-foreground font-medium">Qty</th>
+                    <th className="text-right p-3 text-muted-foreground font-medium">Capital</th>
+                    <th className="text-right p-3 text-muted-foreground font-medium">Entry</th>
                     <th className="text-right p-3 text-muted-foreground font-medium">Exit</th>
                     <th className="text-right p-3 text-muted-foreground font-medium">P&L</th>
                     <th className="text-left p-3 text-muted-foreground font-medium">Status</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {allTrades.map((trade: any) => (
+                  {recentTrades.map((trade: any) => (
                     <tr key={trade.id} className="border-b border-border/50 hover:bg-muted/30 transition-colors">
                       <td className="p-3 text-xs font-mono text-muted-foreground">
                         {new Date(trade.entry_time).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}
@@ -425,15 +441,14 @@ const Martingale = () => {
           )}
         </section>
 
-        {/* Date-wise P&L Summary */}
-        <DateWisePnL sessions={recentSessions} allTrades={allTrades} />
-
-        {/* Session History */}
-        {recentSessions.length > 0 && (
+        {/* Session History (last 2 days) */}
+        {recentSess.length > 0 && (
           <section>
-            <h2 className="text-base font-semibold text-foreground mb-3">Session History</h2>
+            <h2 className="text-base font-semibold text-foreground mb-3">
+              Session History <span className="text-xs font-normal text-muted-foreground">(Last 2 days)</span>
+            </h2>
             <div className="grid gap-2">
-              {recentSessions.map((session: any) => (
+              {recentSess.map((session: any) => (
                 <div key={session.id} className="rounded-lg border border-border bg-card p-3 flex items-center justify-between">
                   <div className="flex items-center gap-3">
                     <span className={cn(
