@@ -488,18 +488,20 @@ const DateWisePnL = ({ sessions, allTrades }: { sessions: any[]; allTrades: any[
   const dateData = useMemo(() => {
     const byDate: Record<string, { pnl: number; trades: number; sessions: number }> = {};
     
+    // Count sessions per date
     for (const session of sessions) {
       if (session.status === 'active') continue;
       const date = new Date(session.created_at).toLocaleDateString('en-IN', { year: 'numeric', month: 'short', day: '2-digit' });
       if (!byDate[date]) byDate[date] = { pnl: 0, trades: 0, sessions: 0 };
-      byDate[date].pnl += Number(session.total_pnl);
       byDate[date].sessions += 1;
     }
     
+    // Sum P&L from individual trades (not sessions) so it matches trade table exactly
     for (const trade of allTrades) {
       if (trade.status !== 'closed') continue;
       const date = new Date(trade.entry_time).toLocaleDateString('en-IN', { year: 'numeric', month: 'short', day: '2-digit' });
       if (!byDate[date]) byDate[date] = { pnl: 0, trades: 0, sessions: 0 };
+      byDate[date].pnl += Number(trade.pnl || 0);
       byDate[date].trades += 1;
     }
     
