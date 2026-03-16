@@ -106,12 +106,20 @@ serve(async (req) => {
       let allTrades: any[] = [];
       if (recentSessions && recentSessions.length > 0) {
         const sessionIds = recentSessions.map((s: any) => s.id);
-        const { data: trades } = await supabase
-          .from('martingale_trades')
-          .select('*')
-          .in('session_id', sessionIds)
-          .order('entry_time', { ascending: false });
-        allTrades = trades || [];
+        // Fetch all trades in batches to avoid default 1000-row limit
+        const batchSize = 500;
+        for (let i = 0; i < sessionIds.length; i += batchSize) {
+          const batch = sessionIds.slice(i, i + batchSize);
+          const { data: trades } = await supabase
+            .from('martingale_trades')
+            .select('*')
+            .in('session_id', batch)
+            .order('entry_time', { ascending: false })
+            .limit(5000);
+          if (trades) allTrades = allTrades.concat(trades);
+        }
+        // Sort all trades by entry_time descending
+        allTrades.sort((a: any, b: any) => new Date(b.entry_time).getTime() - new Date(a.entry_time).getTime());
       }
 
       return new Response(JSON.stringify({
