@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
 import { Play, Square, RefreshCw, Zap, TrendingUp, TrendingDown, ArrowLeftRight, AlertTriangle, DollarSign, Activity, ArrowLeft, Link2, Unlink, Calendar } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Switch } from "@/components/ui/switch";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { Link, useSearchParams } from "react-router-dom";
