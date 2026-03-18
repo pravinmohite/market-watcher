@@ -23,6 +23,7 @@ export type Database = {
           max_rounds: number
           status: string
           total_pnl: number
+          trading_mode: string
         }
         Insert: {
           completed_at?: string | null
@@ -32,6 +33,7 @@ export type Database = {
           max_rounds?: number
           status?: string
           total_pnl?: number
+          trading_mode?: string
         }
         Update: {
           completed_at?: string | null
@@ -41,6 +43,7 @@ export type Database = {
           max_rounds?: number
           status?: string
           total_pnl?: number
+          trading_mode?: string
         }
         Relationships: []
       }

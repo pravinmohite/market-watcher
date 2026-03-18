@@ -1,0 +1,1 @@
+ALTER TABLE public.martingale_sessions ADD COLUMN IF NOT EXISTS trading_mode text NOT NULL DEFAULT 'paper' CHECK (trading_mode IN ('paper', 'actual'));
