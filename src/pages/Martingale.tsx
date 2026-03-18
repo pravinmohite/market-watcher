@@ -424,11 +424,11 @@ const Martingale = () => {
             <div className="space-y-2">
               <p>1️⃣ Smart entry: <strong className="text-foreground">follows last winning direction</strong> (trend-based for first session)</p>
               <p>2️⃣ If <span className="text-loss font-medium">-2%</span> → exit, <strong className="text-foreground">flip direction & double lots</strong></p>
-              <p>3️⃣ Continue flipping & doubling (max 5 rounds)</p>
+              <p>3️⃣ Continue flipping & doubling (max <strong className="text-foreground">{isActive ? activeSession?.max_rounds : maxRounds} rounds</strong>)</p>
             </div>
             <div className="space-y-2">
               <p>🎯 <span className="text-gain font-medium">+2.5%</span> profit → exit & restart fresh</p>
-              <p>⛔ Max 5 rounds → <strong className="text-foreground">bot stops, manual restart required</strong></p>
+              <p>⛔ Max rounds reached → <strong className="text-foreground">bot stops, manual restart required</strong></p>
               <p>🕒 Auto square-off at <strong className="text-foreground">3:25 PM</strong></p>
               <p>🔄 Toggle between <strong className="text-foreground">paper & actual trading</strong></p>
               <p>⚙️ Lot size: 65 (Nifty) • Weekly expiry</p>
