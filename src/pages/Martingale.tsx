@@ -413,9 +413,9 @@ const Martingale = () => {
             </div>
             <div className="space-y-2">
               <p>🎯 <span className="text-gain font-medium">+2.5%</span> profit → exit & restart fresh</p>
-              <p>🔄 Auto-restarts after profit or max rounds</p>
+              <p>⛔ Max 5 rounds → <strong className="text-foreground">bot stops, manual restart required</strong></p>
               <p>🕒 Auto square-off at <strong className="text-foreground">3:25 PM</strong></p>
-              <p>📊 Paper trading only — no real orders</p>
+              <p>🔄 Toggle between <strong className="text-foreground">paper & actual trading</strong></p>
               <p>⚙️ Lot size: 65 (Nifty) • Weekly expiry</p>
             </div>
           </div>
