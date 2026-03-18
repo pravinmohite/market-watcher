@@ -543,7 +543,7 @@ serve(async (req) => {
 
       const { data: newSession } = await supabase
         .from('martingale_sessions')
-        .insert({ status: 'active', current_round: 1, max_rounds: MAX_ROUNDS, trading_mode: tradingMode })
+        .insert({ status: 'active', current_round: 1, max_rounds: activeSession.max_rounds, trading_mode: tradingMode })
         .select().single();
       if (newSession) {
         await supabase.from('martingale_trades').insert({
