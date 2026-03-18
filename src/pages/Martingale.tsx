@@ -168,10 +168,14 @@ const Martingale = () => {
     return d;
   }, []);
 
-  const recentTrades = useMemo(() => 
-    allTrades.filter((t: any) => new Date(t.entry_time) >= twoDaysAgo),
-    [allTrades, twoDaysAgo]
-  );
+  const recentTrades = useMemo(() => {
+    let trades = allTrades.filter((t: any) => new Date(t.entry_time) >= twoDaysAgo);
+    if (roundFilter !== "all") {
+      const maxRound = parseInt(roundFilter);
+      trades = trades.filter((t: any) => t.round <= maxRound);
+    }
+    return trades;
+  }, [allTrades, twoDaysAgo, roundFilter]);
 
   const recentSess = useMemo(() => 
     recentSessions.filter((s: any) => new Date(s.created_at) >= twoDaysAgo),
