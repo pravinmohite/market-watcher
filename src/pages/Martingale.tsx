@@ -53,6 +53,7 @@ const Martingale = () => {
   });
 
   const [tradingMode, setTradingMode] = useState<'paper' | 'actual'>('paper');
+  const [maxRounds, setMaxRounds] = useState<number>(5);
   const [lastTickAction, setLastTickAction] = useState<string | null>(null);
 
   const { data, isLoading, refetch } = useQuery({
@@ -95,7 +96,7 @@ const Martingale = () => {
   const startBot = useMutation({
     mutationFn: async () => {
       const { data, error } = await supabase.functions.invoke("martingale-bot", {
-        body: { action: "start", trading_mode: tradingMode },
+        body: { action: "start", trading_mode: tradingMode, max_rounds: maxRounds },
       });
       if (error) throw error;
       return data;
@@ -194,22 +195,36 @@ const Martingale = () => {
           <div className="flex items-center gap-3">
             {/* Trading Mode Toggle - only when bot is stopped */}
             {!isActive && (
-              <div className="flex items-center gap-2">
-                <span className={cn("text-xs font-medium", tradingMode === 'paper' ? "text-foreground" : "text-muted-foreground")}>Paper</span>
-                <Switch
-                  checked={tradingMode === 'actual'}
-                  onCheckedChange={(checked) => {
-                    if (checked) {
-                      if (!isUpstoxConnected) {
-                        toast.error("Connect Upstox first before enabling actual trading");
-                        return;
+              <div className="flex items-center gap-3">
+                <div className="flex items-center gap-2">
+                  <span className={cn("text-xs font-medium", tradingMode === 'paper' ? "text-foreground" : "text-muted-foreground")}>Paper</span>
+                  <Switch
+                    checked={tradingMode === 'actual'}
+                    onCheckedChange={(checked) => {
+                      if (checked) {
+                        if (!isUpstoxConnected) {
+                          toast.error("Connect Upstox first before enabling actual trading");
+                          return;
+                        }
+                        toast.warning("⚠️ Actual trading mode: Real orders will be placed on your Upstox account!", { duration: 5000 });
                       }
-                      toast.warning("⚠️ Actual trading mode: Real orders will be placed on your Upstox account!", { duration: 5000 });
-                    }
-                    setTradingMode(checked ? 'actual' : 'paper');
-                  }}
-                />
-                <span className={cn("text-xs font-medium", tradingMode === 'actual' ? "text-loss" : "text-muted-foreground")}>Actual</span>
+                      setTradingMode(checked ? 'actual' : 'paper');
+                    }}
+                  />
+                  <span className={cn("text-xs font-medium", tradingMode === 'actual' ? "text-loss" : "text-muted-foreground")}>Actual</span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <span className="text-xs text-muted-foreground">Rounds:</span>
+                  <select
+                    value={maxRounds}
+                    onChange={(e) => setMaxRounds(Number(e.target.value))}
+                    className="text-xs bg-muted border border-border rounded px-1.5 py-0.5 text-foreground"
+                  >
+                    {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(n => (
+                      <option key={n} value={n}>{n}</option>
+                    ))}
+                  </select>
+                </div>
               </div>
             )}
             {isActive && activeSession?.trading_mode && (
@@ -409,11 +424,11 @@ const Martingale = () => {
             <div className="space-y-2">
               <p>1️⃣ Smart entry: <strong className="text-foreground">follows last winning direction</strong> (trend-based for first session)</p>
               <p>2️⃣ If <span className="text-loss font-medium">-2%</span> → exit, <strong className="text-foreground">flip direction & double lots</strong></p>
-              <p>3️⃣ Continue flipping & doubling (max 5 rounds)</p>
+              <p>3️⃣ Continue flipping & doubling (max <strong className="text-foreground">{isActive ? activeSession?.max_rounds : maxRounds} rounds</strong>)</p>
             </div>
             <div className="space-y-2">
               <p>🎯 <span className="text-gain font-medium">+2.5%</span> profit → exit & restart fresh</p>
-              <p>⛔ Max 5 rounds → <strong className="text-foreground">bot stops, manual restart required</strong></p>
+              <p>⛔ Max rounds reached → <strong className="text-foreground">bot stops, manual restart required</strong></p>
               <p>🕒 Auto square-off at <strong className="text-foreground">3:25 PM</strong></p>
               <p>🔄 Toggle between <strong className="text-foreground">paper & actual trading</strong></p>
               <p>⚙️ Lot size: 65 (Nifty) • Weekly expiry</p>
