@@ -21,9 +21,11 @@ interface OptionChainData {
   strikeDiff: number;
   source?: string;
   expiry?: string;
+  otmCEInstrumentKey?: string;
+  otmPEInstrumentKey?: string;
 }
 
-async function fetchNiftyOptionChain(supabaseUrl: string, anonKey: string, strike?: number, optionType?: string, entrySpot?: number, entryPrice?: number): Promise<{ optionData: OptionChainData | null; specificPrice: number | null }> {
+async function fetchNiftyOptionChain(supabaseUrl: string, anonKey: string, strike?: number, optionType?: string, entrySpot?: number, entryPrice?: number): Promise<{ optionData: OptionChainData | null; specificPrice: number | null; specificInstrumentKey: string | null }> {
   try {
     const body: any = { action: 'nifty-option-chain' };
     if (strike) body.strike = strike;
@@ -36,14 +38,90 @@ async function fetchNiftyOptionChain(supabaseUrl: string, anonKey: string, strik
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${anonKey}`, 'apikey': anonKey },
       body: JSON.stringify(body),
     });
-    if (!res.ok) { console.error(`Proxy failed: ${res.status}`); await res.text(); return { optionData: null, specificPrice: null }; }
+    if (!res.ok) { console.error(`Proxy failed: ${res.status}`); await res.text(); return { optionData: null, specificPrice: null, specificInstrumentKey: null }; }
     const data = await res.json();
-    if (!data.success) { console.error(`Proxy error: ${data.error}`); return { optionData: null, specificPrice: null }; }
+    if (!data.success) { console.error(`Proxy error: ${data.error}`); return { optionData: null, specificPrice: null, specificInstrumentKey: null }; }
     return {
-      optionData: { niftySpot: data.niftySpot, atmStrike: data.atmStrike, otmCEStrike: data.otmCEStrike, otmPEStrike: data.otmPEStrike, otmCEPrice: data.otmCEPrice, otmPEPrice: data.otmPEPrice, strikeDiff: data.strikeDiff, source: data.source, expiry: data.expiry },
+      optionData: {
+        niftySpot: data.niftySpot, atmStrike: data.atmStrike, otmCEStrike: data.otmCEStrike, otmPEStrike: data.otmPEStrike,
+        otmCEPrice: data.otmCEPrice, otmPEPrice: data.otmPEPrice, strikeDiff: data.strikeDiff,
+        source: data.source, expiry: data.expiry,
+        otmCEInstrumentKey: data.otmCEInstrumentKey, otmPEInstrumentKey: data.otmPEInstrumentKey,
+      },
       specificPrice: data.specificPrice,
+      specificInstrumentKey: data.specificInstrumentKey || null,
     };
-  } catch (error) { console.error("Option chain error:", error); return { optionData: null, specificPrice: null }; }
+  } catch (error) { console.error("Option chain error:", error); return { optionData: null, specificPrice: null, specificInstrumentKey: null }; }
+}
+
+async function getUpstoxToken(supabase: any): Promise<string | null> {
+  const { data: token } = await supabase
+    .from('upstox_tokens')
+    .select('access_token')
+    .gt('expires_at', new Date().toISOString())
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  return token?.access_token || null;
+}
+
+async function placeUpstoxOrder(accessToken: string, params: {
+  instrumentKey: string;
+  quantity: number;
+  transactionType: 'BUY' | 'SELL';
+  price: number;
+  orderType?: 'LIMIT' | 'MARKET';
+}): Promise<{ success: boolean; orderId?: string; error?: string }> {
+  try {
+    const orderBody = {
+      quantity: params.quantity,
+      product: 'I', // Intraday
+      validity: 'DAY',
+      price: params.price,
+      instrument_token: params.instrumentKey,
+      order_type: params.orderType || 'LIMIT',
+      transaction_type: params.transactionType,
+      disclosed_quantity: 0,
+      trigger_price: 0,
+      is_amo: false,
+    };
+
+    console.log(`Placing Upstox order: ${JSON.stringify(orderBody)}`);
+
+    const res = await fetch('https://api-hft.upstox.com/v2/order/place', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'Authorization': `Bearer ${accessToken}`,
+      },
+      body: JSON.stringify(orderBody),
+    });
+
+    const data = await res.json();
+    if (!res.ok || data.status !== 'success') {
+      console.error(`Upstox order failed: ${JSON.stringify(data)}`);
+      return { success: false, error: data?.errors?.[0]?.message || data?.message || `Order failed (${res.status})` };
+    }
+
+    console.log(`Upstox order placed: ${data.data?.order_id}`);
+    return { success: true, orderId: data.data?.order_id };
+  } catch (error) {
+    console.error('Upstox order error:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+async function sendTelegram(text: string) {
+  const botToken = Deno.env.get('TELEGRAM_BOT_TOKEN');
+  const chatId = Deno.env.get('TELEGRAM_CHAT_ID');
+  if (botToken && chatId) {
+    await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, text, parse_mode: 'Markdown' }),
+    });
+  }
 }
 
 serve(async (req) => {
@@ -106,7 +184,6 @@ serve(async (req) => {
       let allTrades: any[] = [];
       if (recentSessions && recentSessions.length > 0) {
         const sessionIds = recentSessions.map((s: any) => s.id);
-        // Fetch all trades in batches to avoid default 1000-row limit
         const batchSize = 500;
         for (let i = 0; i < sessionIds.length; i += batchSize) {
           const batch = sessionIds.slice(i, i + batchSize);
@@ -118,7 +195,6 @@ serve(async (req) => {
             .limit(5000);
           if (trades) allTrades = allTrades.concat(trades);
         }
-        // Sort all trades by entry_time descending
         allTrades.sort((a: any, b: any) => new Date(b.entry_time).getTime() - new Date(a.entry_time).getTime());
       }
 
@@ -155,6 +231,22 @@ serve(async (req) => {
           if (result.specificPrice !== null) exitPrice = result.specificPrice;
           const pnl = (exitPrice - openTrade.entry_price) * openTrade.lots * LOT_SIZE;
 
+          // Place sell order if actual trading
+          if (activeSession.trading_mode === 'actual') {
+            const accessToken = await getUpstoxToken(supabase);
+            if (accessToken && result.specificInstrumentKey) {
+              const sellResult = await placeUpstoxOrder(accessToken, {
+                instrumentKey: result.specificInstrumentKey,
+                quantity: openTrade.lots * LOT_SIZE,
+                transactionType: 'SELL',
+                price: exitPrice,
+              });
+              if (!sellResult.success) {
+                console.error(`Stop sell order failed: ${sellResult.error}`);
+              }
+            }
+          }
+
           await supabase.from('martingale_trades').update({
             status: 'closed', exit_price: exitPrice, pnl, exit_time: new Date().toISOString(),
           }).eq('id', openTrade.id);
@@ -175,7 +267,9 @@ serve(async (req) => {
     }
 
     if (action === 'start') {
-      // Market hours guard for start action
+      const tradingMode = body.trading_mode || 'paper';
+
+      // Market hours guard
       const nowIST_start = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
       const startHour = nowIST_start.getHours();
       const startMinute = nowIST_start.getMinutes();
@@ -201,6 +295,16 @@ serve(async (req) => {
         });
       }
 
+      // Validate Upstox connection for actual trading
+      if (tradingMode === 'actual') {
+        const accessToken = await getUpstoxToken(supabase);
+        if (!accessToken) {
+          return new Response(JSON.stringify({ success: false, message: 'Cannot start actual trading: Upstox not connected. Please login to Upstox first.' }), {
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
+      }
+
       const { optionData } = await fetchNiftyOptionChain(supabaseUrl, anonKey);
       if (!optionData) {
         return new Response(JSON.stringify({ success: false, message: 'Could not fetch option chain data' }), {
@@ -208,11 +312,8 @@ serve(async (req) => {
         });
       }
 
-      // Determine entry direction:
-      // 1. Check last completed session's last profitable trade direction
-      // 2. If last trade was profitable → keep same direction; if loss → flip
-      // 3. Fallback (first session ever): trend-based (spot vs open proxy)
-      let entryOptionType = 'CE'; // default
+      // Determine entry direction
+      let entryOptionType = 'CE';
 
       const { data: lastSession } = await supabase
         .from('martingale_sessions')
@@ -223,7 +324,6 @@ serve(async (req) => {
         .maybeSingle();
 
       if (lastSession) {
-        // Get the last trade of the previous session
         const { data: lastTrade } = await supabase
           .from('martingale_trades')
           .select('option_type, pnl')
@@ -234,17 +334,13 @@ serve(async (req) => {
 
         if (lastTrade) {
           if (lastTrade.pnl !== null && lastTrade.pnl > 0) {
-            // Last trade was profitable → keep same direction
             entryOptionType = lastTrade.option_type;
           } else {
-            // Last trade was a loss → flip direction
             entryOptionType = lastTrade.option_type === 'CE' ? 'PE' : 'CE';
           }
           console.log(`Direction from last session: lastTrade=${lastTrade.option_type}, pnl=${lastTrade.pnl}, chosen=${entryOptionType}`);
         }
       } else {
-        // First session ever: trend-based entry
-        // If nifty spot > ATM strike → bullish → CE, else PE
         if (optionData.niftySpot < optionData.atmStrike) {
           entryOptionType = 'PE';
         }
@@ -253,19 +349,41 @@ serve(async (req) => {
 
       const entryStrike = entryOptionType === 'CE' ? optionData.otmCEStrike : optionData.otmPEStrike;
       const entryPrice = entryOptionType === 'CE' ? optionData.otmCEPrice : optionData.otmPEPrice;
-
-      const { data: session, error: sessErr } = await supabase
-        .from('martingale_sessions')
-        .insert({ status: 'active', current_round: 1, max_rounds: MAX_ROUNDS })
-        .select()
-        .single();
-      if (sessErr) throw sessErr;
+      const entryInstrumentKey = entryOptionType === 'CE' ? optionData.otmCEInstrumentKey : optionData.otmPEInstrumentKey;
 
       if (entryPrice <= 0) {
         return new Response(JSON.stringify({ success: false, message: `Cannot start: ${entryOptionType} option price is ₹0. Source: ${optionData.source || 'unknown'}` }), {
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         });
       }
+
+      // Place actual buy order if in actual mode
+      if (tradingMode === 'actual') {
+        const accessToken = await getUpstoxToken(supabase);
+        if (!accessToken || !entryInstrumentKey) {
+          return new Response(JSON.stringify({ success: false, message: 'Cannot place order: missing Upstox token or instrument key' }), {
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
+        const buyResult = await placeUpstoxOrder(accessToken, {
+          instrumentKey: entryInstrumentKey,
+          quantity: 1 * LOT_SIZE,
+          transactionType: 'BUY',
+          price: entryPrice,
+        });
+        if (!buyResult.success) {
+          return new Response(JSON.stringify({ success: false, message: `Order failed: ${buyResult.error}` }), {
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
+      }
+
+      const { data: session, error: sessErr } = await supabase
+        .from('martingale_sessions')
+        .insert({ status: 'active', current_round: 1, max_rounds: MAX_ROUNDS, trading_mode: tradingMode })
+        .select()
+        .single();
+      if (sessErr) throw sessErr;
 
       const { error: tradeErr } = await supabase
         .from('martingale_trades')
@@ -276,22 +394,23 @@ serve(async (req) => {
         });
       if (tradeErr) throw tradeErr;
 
+      const modeLabel = tradingMode === 'actual' ? '🔴 ACTUAL' : '📝 Paper';
       return new Response(JSON.stringify({
         success: true,
-        message: `Started! Bought 1 lot ${entryStrike} ${entryOptionType} @ ₹${entryPrice}`,
+        message: `${modeLabel} Started! Bought 1 lot ${entryStrike} ${entryOptionType} @ ₹${entryPrice}`,
         session,
       }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
     }
 
     // action === 'tick'
 
-    // Market hours guard: only process ticks between 9:15 AM and 3:30 PM IST
+    // Market hours guard
     const nowIST_tick = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
     const tickHour = nowIST_tick.getHours();
     const tickMinute = nowIST_tick.getMinutes();
     const tickTime = tickHour * 60 + tickMinute;
-    const marketOpen = 9 * 60 + 15;  // 9:15 AM
-    const marketClose = 15 * 60 + 30; // 3:30 PM
+    const marketOpen = 9 * 60 + 15;
+    const marketClose = 15 * 60 + 30;
 
     if (tickTime < marketOpen || tickTime > marketClose) {
       return new Response(JSON.stringify({ success: true, message: `Outside market hours (${tickHour}:${String(tickMinute).padStart(2, '0')} IST). Skipping tick.` }), {
@@ -311,6 +430,9 @@ serve(async (req) => {
       });
     }
 
+    const tradingMode = activeSession.trading_mode || 'paper';
+    const isActual = tradingMode === 'actual';
+
     const { data: openTrade } = await supabase
       .from('martingale_trades')
       .select('*')
@@ -324,18 +446,31 @@ serve(async (req) => {
       });
     }
 
-    // Check if it's 3:29 PM IST or later - auto square off
+    // Check 3:25 PM auto square off
     const nowIST = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
     const istHour = nowIST.getHours();
     const istMinute = nowIST.getMinutes();
     const isPastSquareOff = istHour > 15 || (istHour === 15 && istMinute >= 25);
 
     if (isPastSquareOff && openTrade) {
-      const { specificPrice: sqPrice } = await fetchNiftyOptionChain(
+      const { specificPrice: sqPrice, specificInstrumentKey: sqInstrKey } = await fetchNiftyOptionChain(
         supabaseUrl, anonKey, openTrade.strike_price, openTrade.option_type, openTrade.nifty_spot, openTrade.entry_price
       );
       const exitPrice = sqPrice !== null ? sqPrice : openTrade.entry_price;
       const sqPnl = (exitPrice - openTrade.entry_price) * openTrade.lots * LOT_SIZE;
+
+      // Place sell order if actual trading
+      if (isActual) {
+        const accessToken = await getUpstoxToken(supabase);
+        if (accessToken && sqInstrKey) {
+          await placeUpstoxOrder(accessToken, {
+            instrumentKey: sqInstrKey,
+            quantity: openTrade.lots * LOT_SIZE,
+            transactionType: 'SELL',
+            price: exitPrice,
+          });
+        }
+      }
 
       await supabase.from('martingale_trades').update({
         status: 'closed', exit_price: exitPrice, pnl: sqPnl, exit_time: new Date().toISOString(),
@@ -345,22 +480,16 @@ serve(async (req) => {
         status: 'squared_off', total_pnl: activeSession.total_pnl + sqPnl, completed_at: new Date().toISOString(),
       }).eq('id', activeSession.id);
 
-      const msg = `🕒 *3:25 PM Square Off*\nExited ${openTrade.option_type} ${openTrade.strike_price} @ ₹${exitPrice} (P&L: ₹${sqPnl.toFixed(0)})`;
-      const botToken = Deno.env.get('TELEGRAM_BOT_TOKEN');
-      const chatId = Deno.env.get('TELEGRAM_CHAT_ID');
-      if (botToken && chatId) {
-        await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ chat_id: chatId, text: msg, parse_mode: 'Markdown' }),
-        });
-      }
+      const modeLabel = isActual ? '🔴' : '📝';
+      const msg = `${modeLabel} 🕒 *3:25 PM Square Off*\nExited ${openTrade.option_type} ${openTrade.strike_price} @ ₹${exitPrice} (P&L: ₹${sqPnl.toFixed(0)})`;
+      await sendTelegram(msg);
 
       return new Response(JSON.stringify({
         success: true, action: `🕒 3:25 PM Square Off! Exited ${openTrade.option_type} ${openTrade.strike_price} @ ₹${exitPrice} (P&L: ₹${sqPnl.toFixed(0)})`,
       }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
     }
 
-    const { specificPrice: currentPrice } = await fetchNiftyOptionChain(
+    const { specificPrice: currentPrice, specificInstrumentKey: currentInstrKey } = await fetchNiftyOptionChain(
       supabaseUrl, anonKey, openTrade.strike_price, openTrade.option_type, openTrade.nifty_spot, openTrade.entry_price
     );
 
@@ -378,22 +507,42 @@ serve(async (req) => {
       const { optionData } = await fetchNiftyOptionChain(supabaseUrl, anonKey);
       if (!optionData) { console.log('Cannot start new session: no option data'); return; }
 
-      // Smart direction: if last trade profitable → keep direction; if loss → flip
       let newDirection: string;
       if (lastPnl > 0) {
-        newDirection = lastOptionType; // keep winning direction
+        newDirection = lastOptionType;
       } else {
-        newDirection = lastOptionType === 'CE' ? 'PE' : 'CE'; // flip on loss
+        newDirection = lastOptionType === 'CE' ? 'PE' : 'CE';
       }
 
       const newStrike = newDirection === 'CE' ? optionData.otmCEStrike : optionData.otmPEStrike;
       const newPrice = newDirection === 'CE' ? optionData.otmCEPrice : optionData.otmPEPrice;
+      const newInstrKey = newDirection === 'CE' ? optionData.otmCEInstrumentKey : optionData.otmPEInstrumentKey;
 
       if (newPrice <= 0) { console.log(`Cannot start new session: ${newDirection} price is 0`); return; }
 
+      // Place buy order if actual trading
+      if (isActual) {
+        const accessToken = await getUpstoxToken(supabase);
+        if (accessToken && newInstrKey) {
+          const buyResult = await placeUpstoxOrder(accessToken, {
+            instrumentKey: newInstrKey,
+            quantity: 1 * LOT_SIZE,
+            transactionType: 'BUY',
+            price: newPrice,
+          });
+          if (!buyResult.success) {
+            console.error(`New session buy order failed: ${buyResult.error}`);
+            return;
+          }
+        } else {
+          console.error('Cannot place buy order: missing token or instrument key');
+          return;
+        }
+      }
+
       const { data: newSession } = await supabase
         .from('martingale_sessions')
-        .insert({ status: 'active', current_round: 1, max_rounds: MAX_ROUNDS })
+        .insert({ status: 'active', current_round: 1, max_rounds: MAX_ROUNDS, trading_mode: tradingMode })
         .select().single();
       if (newSession) {
         await supabase.from('martingale_trades').insert({
@@ -405,21 +554,8 @@ serve(async (req) => {
       }
     }
 
-    async function sendTelegram(text: string) {
-      const botToken = Deno.env.get('TELEGRAM_BOT_TOKEN');
-      const chatId = Deno.env.get('TELEGRAM_CHAT_ID');
-      if (botToken && chatId) {
-        await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ chat_id: chatId, text, parse_mode: 'Markdown' }),
-        });
-      }
-    }
-
     // Check profit target
     if (pnlPercent >= PROFIT_TARGET) {
-      // Race condition guard: only close if still open
       const { data: closeResult } = await supabase.from('martingale_trades').update({
         status: 'closed', exit_price: currentPrice, pnl: pnlAmount, exit_time: new Date().toISOString(),
       }).eq('id', openTrade.id).eq('status', 'open').select();
@@ -428,17 +564,31 @@ serve(async (req) => {
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         });
       }
+
+      // Place sell order if actual trading
+      if (isActual) {
+        const accessToken = await getUpstoxToken(supabase);
+        if (accessToken && currentInstrKey) {
+          await placeUpstoxOrder(accessToken, {
+            instrumentKey: currentInstrKey,
+            quantity: openTrade.lots * LOT_SIZE,
+            transactionType: 'SELL',
+            price: currentPrice,
+          });
+        }
+      }
+
       await supabase.from('martingale_sessions').update({
         status: 'completed', total_pnl: activeSession.total_pnl + pnlAmount, completed_at: new Date().toISOString(),
       }).eq('id', activeSession.id);
 
       await startNewSession(openTrade.option_type, pnlAmount);
-      actionTaken = `🎯 PROFIT! Exited ${openTrade.option_type} ${openTrade.strike_price} @ ₹${currentPrice} (+${pnlPercent.toFixed(1)}%, ₹${pnlAmount.toFixed(0)}). New session started.`;
+      const modeLabel = isActual ? '🔴' : '📝';
+      actionTaken = `${modeLabel} 🎯 PROFIT! Exited ${openTrade.option_type} ${openTrade.strike_price} @ ₹${currentPrice} (+${pnlPercent.toFixed(1)}%, ₹${pnlAmount.toFixed(0)}). New session started.`;
       await sendTelegram(`🎯 *Martingale Bot - PROFIT*\n\n${actionTaken}`);
     }
     // Check loss limit
     else if (pnlPercent <= -LOSS_LIMIT) {
-      // Race condition guard: only close if still open
       const { data: closeResult } = await supabase.from('martingale_trades').update({
         status: 'closed', exit_price: currentPrice, pnl: pnlAmount, exit_time: new Date().toISOString(),
       }).eq('id', openTrade.id).eq('status', 'open').select();
@@ -447,17 +597,33 @@ serve(async (req) => {
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         });
       }
+
+      // Place sell order if actual trading
+      if (isActual) {
+        const accessToken = await getUpstoxToken(supabase);
+        if (accessToken && currentInstrKey) {
+          await placeUpstoxOrder(accessToken, {
+            instrumentKey: currentInstrKey,
+            quantity: openTrade.lots * LOT_SIZE,
+            transactionType: 'SELL',
+            price: currentPrice,
+          });
+        }
+      }
+
       const newRound = activeSession.current_round + 1;
       const newTotalPnl = activeSession.total_pnl + pnlAmount;
 
       if (newRound > MAX_ROUNDS) {
+        // R5 loss: STOP the bot completely - no new session
         await supabase.from('martingale_sessions').update({
           status: 'max_rounds_reached', total_pnl: newTotalPnl,
           completed_at: new Date().toISOString(), current_round: newRound - 1,
         }).eq('id', activeSession.id);
 
-        actionTaken = `⛔ MAX ROUNDS (${MAX_ROUNDS}) reached. Session P&L: ₹${newTotalPnl.toFixed(0)}. Starting fresh.`;
-        await startNewSession(openTrade.option_type, pnlAmount);
+        const modeLabel = isActual ? '🔴' : '📝';
+        actionTaken = `${modeLabel} ⛔ MAX ROUNDS (${MAX_ROUNDS}) reached. Session P&L: ₹${newTotalPnl.toFixed(0)}. Bot stopped — manual restart required.`;
+        await sendTelegram(`📊 *Martingale Bot*\n\n${actionTaken}`);
       } else {
         const newOptionType = openTrade.option_type === 'CE' ? 'PE' : 'CE';
         const newLots = openTrade.lots * 2;
@@ -471,11 +637,30 @@ serve(async (req) => {
 
         const newStrike = newOptionType === 'CE' ? optionData.otmCEStrike : optionData.otmPEStrike;
         const newPrice = newOptionType === 'CE' ? optionData.otmCEPrice : optionData.otmPEPrice;
+        const newInstrKey = newOptionType === 'CE' ? optionData.otmCEInstrumentKey : optionData.otmPEInstrumentKey;
 
         if (newPrice <= 0) {
           return new Response(JSON.stringify({ success: false, message: `Cannot enter round ${newRound}: option price is ₹0` }), {
             headers: { ...corsHeaders, 'Content-Type': 'application/json' },
           });
+        }
+
+        // Place buy order for next round if actual trading
+        if (isActual) {
+          const accessToken = await getUpstoxToken(supabase);
+          if (accessToken && newInstrKey) {
+            const buyResult = await placeUpstoxOrder(accessToken, {
+              instrumentKey: newInstrKey,
+              quantity: newLots * LOT_SIZE,
+              transactionType: 'BUY',
+              price: newPrice,
+            });
+            if (!buyResult.success) {
+              return new Response(JSON.stringify({ success: false, message: `Round ${newRound} buy order failed: ${buyResult.error}` }), {
+                headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+              });
+            }
+          }
         }
 
         await supabase.from('martingale_sessions').update({
@@ -488,7 +673,8 @@ serve(async (req) => {
           status: 'open', nifty_spot: optionData.niftySpot,
         });
 
-        actionTaken = `🔄 Round ${newRound}: Lost ${pnlPercent.toFixed(1)}%. Flipped to ${newLots} lots ${newStrike} ${newOptionType} @ ₹${newPrice}`;
+        const modeLabel = isActual ? '🔴' : '📝';
+        actionTaken = `${modeLabel} 🔄 Round ${newRound}: Lost ${pnlPercent.toFixed(1)}%. Flipped to ${newLots} lots ${newStrike} ${newOptionType} @ ₹${newPrice}`;
       }
 
       await sendTelegram(`📊 *Martingale Bot*\n\n${actionTaken}`);
