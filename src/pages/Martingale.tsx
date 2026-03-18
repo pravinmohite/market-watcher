@@ -180,7 +180,15 @@ const Martingale = () => {
             </div>
             <div>
               <h1 className="text-lg font-bold text-foreground tracking-tight">Martingale Bot</h1>
-              <p className="text-xs text-muted-foreground">Paper Trading • Nifty Weekly Options • Doubling Strategy</p>
+              <p className="text-xs text-muted-foreground">
+                {activeSession?.trading_mode === 'actual' ? (
+                  <span className="text-loss font-medium">🔴 Actual Trading</span>
+                ) : tradingMode === 'actual' ? (
+                  <span className="text-loss font-medium">🔴 Actual Mode Selected</span>
+                ) : (
+                  'Paper Trading'
+                )} • Nifty Weekly Options • Doubling Strategy
+              </p>
             </div>
           </div>
           <div className="flex items-center gap-2">
