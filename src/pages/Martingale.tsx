@@ -195,22 +195,36 @@ const Martingale = () => {
           <div className="flex items-center gap-3">
             {/* Trading Mode Toggle - only when bot is stopped */}
             {!isActive && (
-              <div className="flex items-center gap-2">
-                <span className={cn("text-xs font-medium", tradingMode === 'paper' ? "text-foreground" : "text-muted-foreground")}>Paper</span>
-                <Switch
-                  checked={tradingMode === 'actual'}
-                  onCheckedChange={(checked) => {
-                    if (checked) {
-                      if (!isUpstoxConnected) {
-                        toast.error("Connect Upstox first before enabling actual trading");
-                        return;
+              <div className="flex items-center gap-3">
+                <div className="flex items-center gap-2">
+                  <span className={cn("text-xs font-medium", tradingMode === 'paper' ? "text-foreground" : "text-muted-foreground")}>Paper</span>
+                  <Switch
+                    checked={tradingMode === 'actual'}
+                    onCheckedChange={(checked) => {
+                      if (checked) {
+                        if (!isUpstoxConnected) {
+                          toast.error("Connect Upstox first before enabling actual trading");
+                          return;
+                        }
+                        toast.warning("⚠️ Actual trading mode: Real orders will be placed on your Upstox account!", { duration: 5000 });
                       }
-                      toast.warning("⚠️ Actual trading mode: Real orders will be placed on your Upstox account!", { duration: 5000 });
-                    }
-                    setTradingMode(checked ? 'actual' : 'paper');
-                  }}
-                />
-                <span className={cn("text-xs font-medium", tradingMode === 'actual' ? "text-loss" : "text-muted-foreground")}>Actual</span>
+                      setTradingMode(checked ? 'actual' : 'paper');
+                    }}
+                  />
+                  <span className={cn("text-xs font-medium", tradingMode === 'actual' ? "text-loss" : "text-muted-foreground")}>Actual</span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <span className="text-xs text-muted-foreground">Rounds:</span>
+                  <select
+                    value={maxRounds}
+                    onChange={(e) => setMaxRounds(Number(e.target.value))}
+                    className="text-xs bg-muted border border-border rounded px-1.5 py-0.5 text-foreground"
+                  >
+                    {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(n => (
+                      <option key={n} value={n}>{n}</option>
+                    ))}
+                  </select>
+                </div>
               </div>
             )}
             {isActive && activeSession?.trading_mode && (
