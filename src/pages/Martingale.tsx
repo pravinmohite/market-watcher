@@ -456,10 +456,28 @@ const Martingale = () => {
 
         {/* Trade History (last 2 days) */}
         <section>
-          <h2 className="text-base font-semibold text-foreground mb-3 flex items-center gap-2">
-            <Activity className="w-4 h-4 text-primary" />
-            Trade History <span className="text-xs font-normal text-muted-foreground">(Last 2 days)</span>
-          </h2>
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-base font-semibold text-foreground flex items-center gap-2">
+              <Activity className="w-4 h-4 text-primary" />
+              Trade History <span className="text-xs font-normal text-muted-foreground">(Last 2 days)</span>
+            </h2>
+            <div className="flex items-center gap-2">
+              <Filter className="w-3.5 h-3.5 text-muted-foreground" />
+              <Select value={roundFilter} onValueChange={setRoundFilter}>
+                <SelectTrigger className="h-8 w-[120px] text-xs">
+                  <SelectValue placeholder="All Rounds" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All Rounds</SelectItem>
+                  <SelectItem value="1">R1 only</SelectItem>
+                  <SelectItem value="2">R2 & below</SelectItem>
+                  <SelectItem value="3">R3 & below</SelectItem>
+                  <SelectItem value="4">R4 & below</SelectItem>
+                  <SelectItem value="5">R5 & below</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
           {recentTrades.length === 0 ? (
             <p className="text-sm text-muted-foreground">No trades in the last 2 days.</p>
           ) : (
