@@ -684,13 +684,13 @@ serve(async (req) => {
       function getNextWeeklyExpiry(): string {
         const now = new Date();
         const day = now.getDay();
-        let daysUntilThursday = (4 - day + 7) % 7;
-        if (daysUntilThursday === 0) {
+        let daysUntilTuesday = (2 - day + 7) % 7;
+        if (daysUntilTuesday === 0) {
           const hours = now.getUTCHours() + 5.5;
-          if (hours >= 15.5) daysUntilThursday = 7;
+          if (hours >= 15.5) daysUntilTuesday = 7;
         }
         const expiry = new Date(now);
-        expiry.setDate(now.getDate() + daysUntilThursday);
+        expiry.setDate(now.getDate() + daysUntilTuesday);
         const dd = String(expiry.getDate()).padStart(2, '0');
         const mmm = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][expiry.getMonth()];
         const yyyy = expiry.getFullYear();
