@@ -52,6 +52,7 @@ const Martingale = () => {
     refetchInterval: 60000,
   });
 
+  const [tradingMode, setTradingMode] = useState<'paper' | 'actual'>('paper');
   const [lastTickAction, setLastTickAction] = useState<string | null>(null);
 
   const { data, isLoading, refetch } = useQuery({
