@@ -12,6 +12,7 @@ import { Link, useSearchParams } from "react-router-dom";
 const Martingale = () => {
   const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
+  const [roundFilter, setRoundFilter] = useState<string>("all");
 
   // Check for Upstox OAuth callback code in URL
   useEffect(() => {
