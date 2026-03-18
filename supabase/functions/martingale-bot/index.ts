@@ -268,6 +268,7 @@ serve(async (req) => {
 
     if (action === 'start') {
       const tradingMode = body.trading_mode || 'paper';
+      const maxRounds = Math.min(Math.max(parseInt(body.max_rounds) || DEFAULT_MAX_ROUNDS, 1), 10);
 
       // Market hours guard
       const nowIST_start = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
