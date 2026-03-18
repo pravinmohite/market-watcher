@@ -73,13 +73,15 @@ async function placeUpstoxOrder(accessToken: string, params: {
   orderType?: 'LIMIT' | 'MARKET';
 }): Promise<{ success: boolean; orderId?: string; error?: string }> {
   try {
+    // Use MARKET for SELL orders (exits) to guarantee fill, LIMIT for BUY orders
+    const effectiveOrderType = params.orderType || (params.transactionType === 'SELL' ? 'MARKET' : 'LIMIT');
     const orderBody = {
       quantity: params.quantity,
       product: 'I', // Intraday
       validity: 'DAY',
-      price: params.price,
+      price: effectiveOrderType === 'MARKET' ? 0 : params.price,
       instrument_token: params.instrumentKey,
-      order_type: params.orderType || 'LIMIT',
+      order_type: effectiveOrderType,
       transaction_type: params.transactionType,
       disclosed_quantity: 0,
       trigger_price: 0,
