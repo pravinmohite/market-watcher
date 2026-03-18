@@ -533,8 +533,17 @@ const Martingale = () => {
             </h2>
             <div className="grid gap-2">
               {recentSess.map((session: any) => (
-                <div key={session.id} className="rounded-lg border border-border bg-card p-3 flex items-center justify-between">
+                <div key={session.id} className={cn(
+                  "rounded-lg border bg-card p-3 flex items-center justify-between",
+                  session.trading_mode === 'actual' ? "border-loss/30" : "border-border"
+                )}>
                   <div className="flex items-center gap-3">
+                    <span className={cn(
+                      "px-1.5 py-0.5 rounded-full text-xs font-medium",
+                      session.trading_mode === 'actual' ? "bg-loss/15 text-loss" : "bg-muted text-muted-foreground"
+                    )}>
+                      {session.trading_mode === 'actual' ? '🔴 Live' : '📝 Paper'}
+                    </span>
                     <span className={cn(
                       "px-2 py-0.5 rounded-full text-xs font-medium",
                       session.status === 'active' ? "bg-primary/15 text-primary" :
