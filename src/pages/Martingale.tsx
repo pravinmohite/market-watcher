@@ -459,9 +459,10 @@ const Martingale = () => {
           ) : (
             <div className="overflow-x-auto rounded-xl border border-border">
               <table className="w-full text-sm">
-                <thead>
+                 <thead>
                   <tr className="border-b border-border bg-muted/50">
                     <th className="text-left p-3 text-muted-foreground font-medium">Time</th>
+                    <th className="text-left p-3 text-muted-foreground font-medium">Mode</th>
                     <th className="text-left p-3 text-muted-foreground font-medium">Round</th>
                     <th className="text-left p-3 text-muted-foreground font-medium">Option</th>
                     <th className="text-right p-3 text-muted-foreground font-medium">Lots</th>
