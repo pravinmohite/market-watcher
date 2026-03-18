@@ -53,6 +53,7 @@ const Martingale = () => {
   });
 
   const [tradingMode, setTradingMode] = useState<'paper' | 'actual'>('paper');
+  const [maxRounds, setMaxRounds] = useState<number>(5);
   const [lastTickAction, setLastTickAction] = useState<string | null>(null);
 
   const { data, isLoading, refetch } = useQuery({
