@@ -524,6 +524,9 @@ serve(async (req) => {
           let otmCEPrice = 0;
           let otmPEPrice = 0;
           let specificPrice = null;
+          let otmCEInstrumentKey = '';
+          let otmPEInstrumentKey = '';
+          let specificInstrumentKey = '';
 
           if (ocRes.ok) {
             const ocData = await ocRes.json();
@@ -541,9 +544,11 @@ serve(async (req) => {
 
               if (strikePrice === otmCEStrike && entry.call_options?.market_data) {
                 otmCEPrice = entry.call_options.market_data.ltp || entry.call_options.market_data.ask_price || 0;
+                otmCEInstrumentKey = entry.call_options.instrument_key || '';
               }
               if (strikePrice === otmPEStrike && entry.put_options?.market_data) {
                 otmPEPrice = entry.put_options.market_data.ltp || entry.put_options.market_data.ask_price || 0;
+                otmPEInstrumentKey = entry.put_options.instrument_key || '';
               }
 
               // For specific strike/type lookup (used by tick)
@@ -551,6 +556,7 @@ serve(async (req) => {
                 const side = body.optionType === 'CE' ? entry.call_options : entry.put_options;
                 if (side?.market_data) {
                   specificPrice = side.market_data.ltp || side.market_data.ask_price || null;
+                  specificInstrumentKey = side.instrument_key || '';
                 }
               }
             }
@@ -568,6 +574,7 @@ serve(async (req) => {
               success: true,
               niftySpot, atmStrike, otmCEStrike, otmPEStrike, otmCEPrice, otmPEPrice, strikeDiff,
               specificPrice, expiry: expiry.display, source: 'upstox',
+              otmCEInstrumentKey, otmPEInstrumentKey, specificInstrumentKey,
             }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
           }
           

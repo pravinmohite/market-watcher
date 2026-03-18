@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
 import { Play, Square, RefreshCw, Zap, TrendingUp, TrendingDown, ArrowLeftRight, AlertTriangle, DollarSign, Activity, ArrowLeft, Link2, Unlink, Calendar } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Switch } from "@/components/ui/switch";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { Link, useSearchParams } from "react-router-dom";
@@ -51,6 +52,7 @@ const Martingale = () => {
     refetchInterval: 60000,
   });
 
+  const [tradingMode, setTradingMode] = useState<'paper' | 'actual'>('paper');
   const [lastTickAction, setLastTickAction] = useState<string | null>(null);
 
   const { data, isLoading, refetch } = useQuery({
@@ -93,7 +95,7 @@ const Martingale = () => {
   const startBot = useMutation({
     mutationFn: async () => {
       const { data, error } = await supabase.functions.invoke("martingale-bot", {
-        body: { action: "start" },
+        body: { action: "start", trading_mode: tradingMode },
       });
       if (error) throw error;
       return data;
@@ -178,10 +180,46 @@ const Martingale = () => {
             </div>
             <div>
               <h1 className="text-lg font-bold text-foreground tracking-tight">Martingale Bot</h1>
-              <p className="text-xs text-muted-foreground">Paper Trading • Nifty Weekly Options • Doubling Strategy</p>
+              <p className="text-xs text-muted-foreground">
+                {activeSession?.trading_mode === 'actual' ? (
+                  <span className="text-loss font-medium">🔴 Actual Trading</span>
+                ) : tradingMode === 'actual' ? (
+                  <span className="text-loss font-medium">🔴 Actual Mode Selected</span>
+                ) : (
+                  'Paper Trading'
+                )} • Nifty Weekly Options • Doubling Strategy
+              </p>
             </div>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-3">
+            {/* Trading Mode Toggle - only when bot is stopped */}
+            {!isActive && (
+              <div className="flex items-center gap-2">
+                <span className={cn("text-xs font-medium", tradingMode === 'paper' ? "text-foreground" : "text-muted-foreground")}>Paper</span>
+                <Switch
+                  checked={tradingMode === 'actual'}
+                  onCheckedChange={(checked) => {
+                    if (checked) {
+                      if (!isUpstoxConnected) {
+                        toast.error("Connect Upstox first before enabling actual trading");
+                        return;
+                      }
+                      toast.warning("⚠️ Actual trading mode: Real orders will be placed on your Upstox account!", { duration: 5000 });
+                    }
+                    setTradingMode(checked ? 'actual' : 'paper');
+                  }}
+                />
+                <span className={cn("text-xs font-medium", tradingMode === 'actual' ? "text-loss" : "text-muted-foreground")}>Actual</span>
+              </div>
+            )}
+            {isActive && activeSession?.trading_mode && (
+              <span className={cn(
+                "px-2 py-1 rounded-full text-xs font-medium",
+                activeSession.trading_mode === 'actual' ? "bg-loss/15 text-loss" : "bg-muted text-muted-foreground"
+              )}>
+                {activeSession.trading_mode === 'actual' ? '🔴 LIVE' : '📝 Paper'}
+              </span>
+            )}
             {isActive ? (
               <>
                 <Button onClick={() => tickBot.mutate()} disabled={tickBot.isPending} variant="outline" size="sm" className="gap-1.5">
@@ -194,9 +232,22 @@ const Martingale = () => {
                 </Button>
               </>
             ) : (
-              <Button onClick={() => startBot.mutate()} disabled={startBot.isPending} size="sm" className="gap-1.5">
+              <Button
+                onClick={() => {
+                  if (tradingMode === 'actual') {
+                    if (confirm('⚠️ You are about to start ACTUAL TRADING. Real orders will be placed on your Upstox account. Continue?')) {
+                      startBot.mutate();
+                    }
+                  } else {
+                    startBot.mutate();
+                  }
+                }}
+                disabled={startBot.isPending}
+                size="sm"
+                className={cn("gap-1.5", tradingMode === 'actual' && "bg-loss hover:bg-loss/90")}
+              >
                 <Play className="w-3.5 h-3.5" />
-                {startBot.isPending ? "Starting..." : "Start Bot"}
+                {startBot.isPending ? "Starting..." : tradingMode === 'actual' ? "Start LIVE" : "Start Bot"}
               </Button>
             )}
           </div>
@@ -362,9 +413,9 @@ const Martingale = () => {
             </div>
             <div className="space-y-2">
               <p>🎯 <span className="text-gain font-medium">+2.5%</span> profit → exit & restart fresh</p>
-              <p>🔄 Auto-restarts after profit or max rounds</p>
+              <p>⛔ Max 5 rounds → <strong className="text-foreground">bot stops, manual restart required</strong></p>
               <p>🕒 Auto square-off at <strong className="text-foreground">3:25 PM</strong></p>
-              <p>📊 Paper trading only — no real orders</p>
+              <p>🔄 Toggle between <strong className="text-foreground">paper & actual trading</strong></p>
               <p>⚙️ Lot size: 65 (Nifty) • Weekly expiry</p>
             </div>
           </div>
