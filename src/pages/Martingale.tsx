@@ -1,9 +1,10 @@
 import { useState, useEffect, useMemo } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
-import { Play, Square, RefreshCw, Zap, TrendingUp, TrendingDown, ArrowLeftRight, AlertTriangle, DollarSign, Activity, ArrowLeft, Link2, Unlink, Calendar } from "lucide-react";
+import { Play, Square, RefreshCw, Zap, TrendingUp, TrendingDown, ArrowLeftRight, AlertTriangle, DollarSign, Activity, ArrowLeft, Link2, Unlink, Calendar, Filter } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { Link, useSearchParams } from "react-router-dom";
@@ -11,6 +12,7 @@ import { Link, useSearchParams } from "react-router-dom";
 const Martingale = () => {
   const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
+  const [roundFilter, setRoundFilter] = useState<string>("all");
 
   // Check for Upstox OAuth callback code in URL
   useEffect(() => {
@@ -166,10 +168,14 @@ const Martingale = () => {
     return d;
   }, []);
 
-  const recentTrades = useMemo(() => 
-    allTrades.filter((t: any) => new Date(t.entry_time) >= twoDaysAgo),
-    [allTrades, twoDaysAgo]
-  );
+  const recentTrades = useMemo(() => {
+    let trades = allTrades.filter((t: any) => new Date(t.entry_time) >= twoDaysAgo);
+    if (roundFilter !== "all") {
+      const maxRound = parseInt(roundFilter);
+      trades = trades.filter((t: any) => t.round <= maxRound);
+    }
+    return trades;
+  }, [allTrades, twoDaysAgo, roundFilter]);
 
   const recentSess = useMemo(() => 
     recentSessions.filter((s: any) => new Date(s.created_at) >= twoDaysAgo),
@@ -450,10 +456,28 @@ const Martingale = () => {
 
         {/* Trade History (last 2 days) */}
         <section>
-          <h2 className="text-base font-semibold text-foreground mb-3 flex items-center gap-2">
-            <Activity className="w-4 h-4 text-primary" />
-            Trade History <span className="text-xs font-normal text-muted-foreground">(Last 2 days)</span>
-          </h2>
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-base font-semibold text-foreground flex items-center gap-2">
+              <Activity className="w-4 h-4 text-primary" />
+              Trade History <span className="text-xs font-normal text-muted-foreground">(Last 2 days)</span>
+            </h2>
+            <div className="flex items-center gap-2">
+              <Filter className="w-3.5 h-3.5 text-muted-foreground" />
+              <Select value={roundFilter} onValueChange={setRoundFilter}>
+                <SelectTrigger className="h-8 w-[120px] text-xs">
+                  <SelectValue placeholder="All Rounds" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All Rounds</SelectItem>
+                  <SelectItem value="1">R1 only</SelectItem>
+                  <SelectItem value="2">R2 & below</SelectItem>
+                  <SelectItem value="3">R3 & below</SelectItem>
+                  <SelectItem value="4">R4 & below</SelectItem>
+                  <SelectItem value="5">R5 & below</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
           {recentTrades.length === 0 ? (
             <p className="text-sm text-muted-foreground">No trades in the last 2 days.</p>
           ) : (
