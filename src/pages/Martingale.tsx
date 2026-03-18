@@ -149,6 +149,15 @@ const Martingale = () => {
   const isUpstoxConnected = upstoxStatus?.connected;
   const dataSource = optionData?.source;
 
+  // Build session mode lookup
+  const sessionModeMap = useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const s of recentSessions) {
+      map[s.id] = s.trading_mode || 'paper';
+    }
+    return map;
+  }, [recentSessions]);
+
   // Filter trades and sessions to last 2 days
   const twoDaysAgo = useMemo(() => {
     const d = new Date();
