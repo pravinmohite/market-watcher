@@ -577,36 +577,46 @@ const Martingale = () => {
   );
 };
 
-const DateWisePnL = ({ sessions, allTrades }: { sessions: any[]; allTrades: any[] }) => {
+const DateWisePnL = ({ sessions, allTrades, sessionModeMap }: { sessions: any[]; allTrades: any[]; sessionModeMap: Record<string, string> }) => {
   const dateData = useMemo(() => {
-    const byDate: Record<string, { pnl: number; trades: number; sessions: number }> = {};
+    const byDate: Record<string, { pnl: number; trades: number; sessions: number; paperPnl: number; actualPnl: number; paperTrades: number; actualTrades: number }> = {};
     
-    // Count sessions per date
     for (const session of sessions) {
       if (session.status === 'active') continue;
       const date = new Date(session.created_at).toLocaleDateString('en-IN', { year: 'numeric', month: 'short', day: '2-digit' });
-      if (!byDate[date]) byDate[date] = { pnl: 0, trades: 0, sessions: 0 };
+      if (!byDate[date]) byDate[date] = { pnl: 0, trades: 0, sessions: 0, paperPnl: 0, actualPnl: 0, paperTrades: 0, actualTrades: 0 };
       byDate[date].sessions += 1;
     }
     
-    // Sum P&L from individual trades (not sessions) so it matches trade table exactly
     for (const trade of allTrades) {
       if (trade.status !== 'closed') continue;
       const date = new Date(trade.entry_time).toLocaleDateString('en-IN', { year: 'numeric', month: 'short', day: '2-digit' });
-      if (!byDate[date]) byDate[date] = { pnl: 0, trades: 0, sessions: 0 };
-      byDate[date].pnl += Number(trade.pnl || 0);
+      if (!byDate[date]) byDate[date] = { pnl: 0, trades: 0, sessions: 0, paperPnl: 0, actualPnl: 0, paperTrades: 0, actualTrades: 0 };
+      const tradePnl = Number(trade.pnl || 0);
+      const mode = sessionModeMap[trade.session_id] || 'paper';
+      byDate[date].pnl += tradePnl;
       byDate[date].trades += 1;
+      if (mode === 'actual') {
+        byDate[date].actualPnl += tradePnl;
+        byDate[date].actualTrades += 1;
+      } else {
+        byDate[date].paperPnl += tradePnl;
+        byDate[date].paperTrades += 1;
+      }
     }
     
     return Object.entries(byDate)
       .sort(([a], [b]) => new Date(b).getTime() - new Date(a).getTime());
-  }, [sessions, allTrades]);
+  }, [sessions, allTrades, sessionModeMap]);
 
   if (dateData.length === 0) return null;
 
   const totalPnl = dateData.reduce((sum, [, d]) => sum + d.pnl, 0);
+  const totalActualPnl = dateData.reduce((sum, [, d]) => sum + d.actualPnl, 0);
+  const totalPaperPnl = dateData.reduce((sum, [, d]) => sum + d.paperPnl, 0);
   const winDays = dateData.filter(([, d]) => d.pnl > 0).length;
   const lossDays = dateData.filter(([, d]) => d.pnl < 0).length;
+  const hasActualTrades = dateData.some(([, d]) => d.actualTrades > 0);
 
   return (
     <section>
@@ -615,13 +625,29 @@ const DateWisePnL = ({ sessions, allTrades }: { sessions: any[]; allTrades: any[
         Date-wise P&L
       </h2>
       {/* Summary */}
-      <div className="grid grid-cols-3 gap-3 mb-3">
+      <div className={cn("grid gap-3 mb-3", hasActualTrades ? "grid-cols-2 md:grid-cols-5" : "grid-cols-3")}>
         <div className="rounded-xl border border-border bg-card p-3 text-center">
           <p className="text-xs text-muted-foreground">Total P&L</p>
           <p className={cn("text-lg font-bold font-mono", totalPnl >= 0 ? "text-gain" : "text-loss")}>
             ₹{totalPnl.toFixed(0)}
           </p>
         </div>
+        {hasActualTrades && (
+          <>
+            <div className="rounded-xl border border-loss/30 bg-card p-3 text-center">
+              <p className="text-xs text-muted-foreground">🔴 Actual P&L</p>
+              <p className={cn("text-lg font-bold font-mono", totalActualPnl >= 0 ? "text-gain" : "text-loss")}>
+                ₹{totalActualPnl.toFixed(0)}
+              </p>
+            </div>
+            <div className="rounded-xl border border-border bg-card p-3 text-center">
+              <p className="text-xs text-muted-foreground">📝 Paper P&L</p>
+              <p className={cn("text-lg font-bold font-mono", totalPaperPnl >= 0 ? "text-gain" : "text-loss")}>
+                ₹{totalPaperPnl.toFixed(0)}
+              </p>
+            </div>
+          </>
+        )}
         <div className="rounded-xl border border-border bg-card p-3 text-center">
           <p className="text-xs text-muted-foreground">Win Days</p>
           <p className="text-lg font-bold font-mono text-gain">{winDays}</p>
@@ -640,6 +666,12 @@ const DateWisePnL = ({ sessions, allTrades }: { sessions: any[]; allTrades: any[
               <th className="text-right p-3 text-muted-foreground font-medium">Sessions</th>
               <th className="text-right p-3 text-muted-foreground font-medium">Trades</th>
               <th className="text-right p-3 text-muted-foreground font-medium">P&L</th>
+              {hasActualTrades && (
+                <>
+                  <th className="text-right p-3 text-muted-foreground font-medium">🔴 Actual</th>
+                  <th className="text-right p-3 text-muted-foreground font-medium">📝 Paper</th>
+                </>
+              )}
             </tr>
           </thead>
           <tbody>
@@ -651,8 +683,24 @@ const DateWisePnL = ({ sessions, allTrades }: { sessions: any[]; allTrades: any[
                 <td className={cn("p-3 text-right font-mono font-medium", d.pnl >= 0 ? "text-gain" : "text-loss")}>
                   ₹{d.pnl.toFixed(0)}
                 </td>
+                {hasActualTrades && (
+                  <>
+                    <td className={cn("p-3 text-right font-mono font-medium", d.actualPnl >= 0 ? "text-gain" : "text-loss")}>
+                      {d.actualTrades > 0 ? `₹${d.actualPnl.toFixed(0)}` : '—'}
+                    </td>
+                    <td className={cn("p-3 text-right font-mono font-medium", d.paperPnl >= 0 ? "text-gain" : "text-loss")}>
+                      {d.paperTrades > 0 ? `₹${d.paperPnl.toFixed(0)}` : '—'}
+                    </td>
+                  </>
+                )}
               </tr>
             ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+};
           </tbody>
         </table>
       </div>
