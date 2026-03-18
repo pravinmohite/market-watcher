@@ -480,6 +480,14 @@ const Martingale = () => {
                       <td className="p-3 text-xs font-mono text-muted-foreground">
                         {new Date(trade.entry_time).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}
                       </td>
+                      <td className="p-3">
+                        <span className={cn(
+                          "px-1.5 py-0.5 rounded-full text-xs font-medium",
+                          sessionModeMap[trade.session_id] === 'actual' ? "bg-loss/15 text-loss" : "bg-muted text-muted-foreground"
+                        )}>
+                          {sessionModeMap[trade.session_id] === 'actual' ? '🔴 Live' : '📝 Paper'}
+                        </span>
+                      </td>
                       <td className="p-3 font-mono text-foreground">R{trade.round}</td>
                       <td className="p-3 font-mono text-foreground">
                         <span className={cn(
