@@ -96,7 +96,7 @@ const Martingale = () => {
   const startBot = useMutation({
     mutationFn: async () => {
       const { data, error } = await supabase.functions.invoke("martingale-bot", {
-        body: { action: "start", trading_mode: tradingMode },
+        body: { action: "start", trading_mode: tradingMode, max_rounds: maxRounds },
       });
       if (error) throw error;
       return data;
