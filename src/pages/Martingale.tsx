@@ -191,7 +191,35 @@ const Martingale = () => {
               </p>
             </div>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-3">
+            {/* Trading Mode Toggle - only when bot is stopped */}
+            {!isActive && (
+              <div className="flex items-center gap-2">
+                <span className={cn("text-xs font-medium", tradingMode === 'paper' ? "text-foreground" : "text-muted-foreground")}>Paper</span>
+                <Switch
+                  checked={tradingMode === 'actual'}
+                  onCheckedChange={(checked) => {
+                    if (checked) {
+                      if (!isUpstoxConnected) {
+                        toast.error("Connect Upstox first before enabling actual trading");
+                        return;
+                      }
+                      toast.warning("⚠️ Actual trading mode: Real orders will be placed on your Upstox account!", { duration: 5000 });
+                    }
+                    setTradingMode(checked ? 'actual' : 'paper');
+                  }}
+                />
+                <span className={cn("text-xs font-medium", tradingMode === 'actual' ? "text-loss" : "text-muted-foreground")}>Actual</span>
+              </div>
+            )}
+            {isActive && activeSession?.trading_mode && (
+              <span className={cn(
+                "px-2 py-1 rounded-full text-xs font-medium",
+                activeSession.trading_mode === 'actual' ? "bg-loss/15 text-loss" : "bg-muted text-muted-foreground"
+              )}>
+                {activeSession.trading_mode === 'actual' ? '🔴 LIVE' : '📝 Paper'}
+              </span>
+            )}
             {isActive ? (
               <>
                 <Button onClick={() => tickBot.mutate()} disabled={tickBot.isPending} variant="outline" size="sm" className="gap-1.5">
@@ -204,9 +232,22 @@ const Martingale = () => {
                 </Button>
               </>
             ) : (
-              <Button onClick={() => startBot.mutate()} disabled={startBot.isPending} size="sm" className="gap-1.5">
+              <Button
+                onClick={() => {
+                  if (tradingMode === 'actual') {
+                    if (confirm('⚠️ You are about to start ACTUAL TRADING. Real orders will be placed on your Upstox account. Continue?')) {
+                      startBot.mutate();
+                    }
+                  } else {
+                    startBot.mutate();
+                  }
+                }}
+                disabled={startBot.isPending}
+                size="sm"
+                className={cn("gap-1.5", tradingMode === 'actual' && "bg-loss hover:bg-loss/90")}
+              >
                 <Play className="w-3.5 h-3.5" />
-                {startBot.isPending ? "Starting..." : "Start Bot"}
+                {startBot.isPending ? "Starting..." : tradingMode === 'actual' ? "Start LIVE" : "Start Bot"}
               </Button>
             )}
           </div>
