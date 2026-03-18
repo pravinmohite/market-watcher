@@ -615,15 +615,15 @@ serve(async (req) => {
       const newRound = activeSession.current_round + 1;
       const newTotalPnl = activeSession.total_pnl + pnlAmount;
 
-      if (newRound > MAX_ROUNDS) {
-        // R5 loss: STOP the bot completely - no new session
+      if (newRound > activeSession.max_rounds) {
+        // Max rounds loss: STOP the bot completely - no new session
         await supabase.from('martingale_sessions').update({
           status: 'max_rounds_reached', total_pnl: newTotalPnl,
           completed_at: new Date().toISOString(), current_round: newRound - 1,
         }).eq('id', activeSession.id);
 
         const modeLabel = isActual ? '🔴' : '📝';
-        actionTaken = `${modeLabel} ⛔ MAX ROUNDS (${MAX_ROUNDS}) reached. Session P&L: ₹${newTotalPnl.toFixed(0)}. Bot stopped — manual restart required.`;
+        actionTaken = `${modeLabel} ⛔ MAX ROUNDS (${activeSession.max_rounds}) reached. Session P&L: ₹${newTotalPnl.toFixed(0)}. Bot stopped — manual restart required.`;
         await sendTelegram(`📊 *Martingale Bot*\n\n${actionTaken}`);
       } else {
         const newOptionType = openTrade.option_type === 'CE' ? 'PE' : 'CE';
