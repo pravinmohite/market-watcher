@@ -9,7 +9,7 @@ const corsHeaders = {
 const LOT_SIZE = 65;
 const PROFIT_TARGET = 2.5;
 const LOSS_LIMIT = 2;
-const MAX_ROUNDS = 5;
+const DEFAULT_MAX_ROUNDS = 5;
 
 interface OptionChainData {
   niftySpot: number;
