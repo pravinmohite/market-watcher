@@ -181,7 +181,7 @@ serve(async (req) => {
         .from('martingale_sessions')
         .select('*')
         .order('created_at', { ascending: false })
-        .limit(100);
+        .limit(500);
 
       let allTrades: any[] = [];
       if (recentSessions && recentSessions.length > 0) {
