@@ -381,7 +381,7 @@ serve(async (req) => {
 
       const { data: session, error: sessErr } = await supabase
         .from('martingale_sessions')
-        .insert({ status: 'active', current_round: 1, max_rounds: MAX_ROUNDS, trading_mode: tradingMode })
+        .insert({ status: 'active', current_round: 1, max_rounds: maxRounds, trading_mode: tradingMode })
         .select()
         .single();
       if (sessErr) throw sessErr;
