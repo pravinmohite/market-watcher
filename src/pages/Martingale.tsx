@@ -446,7 +446,7 @@ const Martingale = () => {
         </section>
 
         {/* Date-wise P&L Summary (all days) */}
-        <DateWisePnL sessions={recentSessions} allTrades={allTrades} />
+        <DateWisePnL sessions={recentSessions} allTrades={allTrades} sessionModeMap={sessionModeMap} />
 
         {/* Trade History (last 2 days) */}
         <section>
