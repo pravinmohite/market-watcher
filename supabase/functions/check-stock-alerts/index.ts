@@ -578,7 +578,70 @@ serve(async (req) => {
             }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
           }
           
-          console.log('Upstox returned 0 prices, falling back to NSE estimates');
+          // Option chain returned no data - try contract API for instrument keys
+          console.log('Upstox OC empty, trying contract API for instrument keys');
+          try {
+            const contractUrl = `https://api.upstox.com/v2/option/contract?instrument_key=NSE_INDEX%7CNifty%2050&expiry_date=${expiry.iso}`;
+            const contractRes = await fetch(contractUrl, { headers: upstoxHeaders });
+            if (contractRes.ok) {
+              const contractData = await contractRes.json();
+              const contracts = contractData?.data || [];
+              console.log(`Contract API: ${contracts.length} contracts for ${expiry.iso}`);
+              
+              for (const c of contracts) {
+                const sp = c.strike_price;
+                const iType = c.instrument_type;
+                if (sp === otmCEStrike && iType === 'CE') otmCEInstrumentKey = c.instrument_key || '';
+                if (sp === otmPEStrike && iType === 'PE') otmPEInstrumentKey = c.instrument_key || '';
+                if (body.strike && body.optionType && sp === body.strike && iType === body.optionType) {
+                  specificInstrumentKey = c.instrument_key || '';
+                }
+              }
+              console.log(`Contract keys - CE: ${otmCEInstrumentKey}, PE: ${otmPEInstrumentKey}, specific: ${specificInstrumentKey}`);
+
+              // Fetch prices via market quotes for found instrument keys
+              const keysToFetch = [otmCEInstrumentKey, otmPEInstrumentKey, specificInstrumentKey].filter(k => k);
+              if (keysToFetch.length > 0) {
+                const quotesUrl = `https://api.upstox.com/v2/market-quote/quotes?instrument_key=${keysToFetch.map(k => encodeURIComponent(k)).join(',')}`;
+                const quotesRes = await fetch(quotesUrl, { headers: upstoxHeaders });
+                if (quotesRes.ok) {
+                  const quotesData = await quotesRes.json();
+                  const quotes = quotesData?.data || {};
+                  for (const [key, quote] of Object.entries(quotes)) {
+                    const q = quote as any;
+                    const ltp = q?.last_price || 0;
+                    // Match by checking if the key contains the exchange_token part
+                    if (otmCEInstrumentKey && key.includes(otmCEInstrumentKey.replace('NSE_FO|', 'NSE_FO:'))) otmCEPrice = ltp;
+                    if (otmPEInstrumentKey && key.includes(otmPEInstrumentKey.replace('NSE_FO|', 'NSE_FO:'))) otmPEPrice = ltp;
+                    if (specificInstrumentKey && key.includes(specificInstrumentKey.replace('NSE_FO|', 'NSE_FO:'))) specificPrice = ltp;
+                  }
+                  console.log(`Quote prices - CE: ₹${otmCEPrice}, PE: ₹${otmPEPrice}, specific: ${specificPrice}`);
+                } else { await quotesRes.text(); }
+              }
+
+              // Return with contract-sourced data if we have instrument keys
+              if (otmCEInstrumentKey || otmPEInstrumentKey) {
+                // If prices still 0, we'll get them from NSE but keep the keys
+                if (otmCEPrice > 0 || otmPEPrice > 0 || specificPrice !== null) {
+                  return new Response(JSON.stringify({
+                    success: true,
+                    niftySpot, atmStrike, otmCEStrike, otmPEStrike, otmCEPrice, otmPEPrice, strikeDiff,
+                    specificPrice, expiry: expiry.display, source: 'upstox-contract',
+                    otmCEInstrumentKey, otmPEInstrumentKey, specificInstrumentKey,
+                  }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+                }
+              }
+            } else { await contractRes.text(); }
+          } catch (contractErr) {
+            console.error('Contract API error:', contractErr);
+          }
+
+          // Store instrument keys found via contract API
+          var savedCEKey = otmCEInstrumentKey;
+          var savedPEKey = otmPEInstrumentKey;
+          var savedSpecificKey = specificInstrumentKey;
+
+          console.log('Falling back to NSE estimates (keys preserved if found)');
           // Fall through to NSE fallback below
         } catch (upstoxErr) {
           console.error('Upstox API error, falling back to NSE:', upstoxErr);
@@ -641,7 +704,6 @@ serve(async (req) => {
       if (body.strike && body.optionType) {
         const dist = Math.abs(body.strike - niftySpot);
         const baseEstimate = parseFloat(Math.max(5, niftySpot * 0.013 - dist * 0.5).toFixed(2));
-        // If we have entry price and entry spot, simulate price movement
         if (body.entryPrice && body.entrySpot) {
           const spotChange = niftySpot - body.entrySpot;
           const delta = body.optionType === 'CE' ? 0.3 : -0.3;
@@ -651,10 +713,16 @@ serve(async (req) => {
         }
       }
 
+      // Carry over instrument keys from Upstox contract API if available
+      const finalCEKey = (typeof savedCEKey !== 'undefined' && savedCEKey) || '';
+      const finalPEKey = (typeof savedPEKey !== 'undefined' && savedPEKey) || '';
+      const finalSpecificKey = (typeof savedSpecificKey !== 'undefined' && savedSpecificKey) || '';
+
       return new Response(JSON.stringify({
         success: true,
         niftySpot, atmStrike, otmCEStrike, otmPEStrike, otmCEPrice, otmPEPrice, strikeDiff,
-        specificPrice, expiry: getNextWeeklyExpiry(), source: 'nse-estimate',
+        specificPrice, expiry: getNextWeeklyExpiry(), source: finalCEKey ? 'nse-estimate-with-keys' : 'nse-estimate',
+        otmCEInstrumentKey: finalCEKey, otmPEInstrumentKey: finalPEKey, specificInstrumentKey: finalSpecificKey,
       }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
     }
 
