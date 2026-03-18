@@ -495,17 +495,17 @@ serve(async (req) => {
           const otmCEStrike = atmStrike + strikeDiff;
           const otmPEStrike = atmStrike - strikeDiff;
 
-          // Calculate nearest weekly expiry (Thursday) in YYYY-MM-DD format for Upstox
+          // Calculate nearest weekly expiry (Tuesday since Sep 2025) in YYYY-MM-DD format for Upstox
           function getNextWeeklyExpiryISO(): { iso: string; display: string } {
             const now = new Date();
             const day = now.getDay();
-            let daysUntilThursday = (4 - day + 7) % 7;
-            if (daysUntilThursday === 0) {
+            let daysUntilTuesday = (2 - day + 7) % 7;
+            if (daysUntilTuesday === 0) {
               const hours = now.getUTCHours() + 5.5;
-              if (hours >= 15.5) daysUntilThursday = 7;
+              if (hours >= 15.5) daysUntilTuesday = 7;
             }
             const expiry = new Date(now);
-            expiry.setDate(now.getDate() + daysUntilThursday);
+            expiry.setDate(now.getDate() + daysUntilTuesday);
             const yyyy = expiry.getFullYear();
             const mm = String(expiry.getMonth() + 1).padStart(2, '0');
             const dd = String(expiry.getDate()).padStart(2, '0');
