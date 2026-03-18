@@ -701,12 +701,6 @@ const DateWisePnL = ({ sessions, allTrades, sessionModeMap }: { sessions: any[];
     </section>
   );
 };
-          </tbody>
-        </table>
-      </div>
-    </section>
-  );
-};
 
 const MartingaleStatCard = ({ icon, label, value }: { icon: React.ReactNode; label: string; value: string }) => (
   <div className="rounded-xl border border-border p-3 bg-card">
