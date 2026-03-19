@@ -346,38 +346,7 @@ const Martingale = () => {
           )}
         </div>
 
-        {/* Manual Token Input */}
-        <div className="rounded-xl border border-border bg-card p-4">
-          <div className="flex items-center gap-2 mb-2">
-            <Key className="w-4 h-4 text-muted-foreground" />
-            <p className="text-sm font-medium text-foreground">Update Access Token</p>
-            <span className="text-xs text-muted-foreground">(paste daily Upstox token)</span>
-          </div>
-          <div className="flex gap-2">
-            <Input
-              type="password"
-              placeholder="Paste your Upstox access token here..."
-              value={manualToken}
-              onChange={(e) => setManualToken(e.target.value)}
-              className="flex-1 text-xs font-mono"
-            />
-            <Button
-              onClick={() => {
-                if (!manualToken.trim()) {
-                  toast.error("Please paste a token first");
-                  return;
-                }
-                saveManualToken.mutate(manualToken.trim());
-              }}
-              disabled={saveManualToken.isPending || !manualToken.trim()}
-              size="sm"
-              className="gap-1.5"
-            >
-              <Key className="w-3.5 h-3.5" />
-              {saveManualToken.isPending ? "Saving..." : "Save Token"}
-            </Button>
-          </div>
-        </div>
+        {/* Status Banner */}
         <div className={cn(
           "rounded-xl border p-4",
           isActive ? "border-primary/30 bg-primary/5" : "border-border bg-card"
