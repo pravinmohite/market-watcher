@@ -332,16 +332,18 @@ const Martingale = () => {
               )}
             </div>
           </div>
-          <Button
-            onClick={() => connectUpstox.mutate()}
-            disabled={connectUpstox.isPending}
-            variant="outline"
-            size="sm"
-            className={cn("gap-1.5", isUpstoxConnected ? "border-gain/50 text-gain hover:bg-gain/10" : "border-warning/50 text-warning hover:bg-warning/10")}
-          >
-            <Link2 className="w-3.5 h-3.5" />
-            {connectUpstox.isPending ? "Redirecting..." : isUpstoxConnected ? "Refresh Token" : "Connect Upstox"}
-          </Button>
+          {!isUpstoxConnected && (
+            <Button
+              onClick={() => connectUpstox.mutate()}
+              disabled={connectUpstox.isPending}
+              variant="outline"
+              size="sm"
+              className="gap-1.5 border-warning/50 text-warning hover:bg-warning/10"
+            >
+              <Link2 className="w-3.5 h-3.5" />
+              {connectUpstox.isPending ? "Redirecting..." : "Connect Upstox"}
+            </Button>
+          )}
         </div>
 
         {/* Manual Token Input */}
