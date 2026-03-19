@@ -20,6 +20,7 @@ export type Database = {
           created_at: string
           current_round: number
           id: string
+          last_tick_at: string | null
           max_rounds: number
           status: string
           total_pnl: number
@@ -30,6 +31,7 @@ export type Database = {
           created_at?: string
           current_round?: number
           id?: string
+          last_tick_at?: string | null
           max_rounds?: number
           status?: string
           total_pnl?: number
@@ -40,6 +42,7 @@ export type Database = {
           created_at?: string
           current_round?: number
           id?: string
+          last_tick_at?: string | null
           max_rounds?: number
           status?: string
           total_pnl?: number

@@ -1,0 +1,1 @@
+ALTER TABLE public.martingale_sessions ADD COLUMN last_tick_at timestamp with time zone DEFAULT NULL;

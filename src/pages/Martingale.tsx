@@ -63,7 +63,7 @@ const Martingale = () => {
     queryKey: ["martingale-status"],
     queryFn: async () => {
       const { data: tickData } = await supabase.functions.invoke("martingale-bot", {
-        body: { action: "tick" },
+        body: { action: "tick", source: "ui" },
       });
       if (tickData?.action && tickData.action !== lastTickAction && !tickData.action.startsWith('Monitoring')) {
         setLastTickAction(tickData.action);
