@@ -96,7 +96,6 @@ const Martingale = () => {
     onError: () => toast.error("Failed to get Upstox auth URL"),
   });
 
-  const saveManualToken = useMutation({
     mutationFn: async (token: string) => {
       const { data, error } = await supabase.functions.invoke("upstox-auth", {
         body: { action: "save-manual-token", access_token: token },
