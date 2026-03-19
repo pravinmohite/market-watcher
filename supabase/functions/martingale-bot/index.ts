@@ -405,8 +405,43 @@ serve(async (req) => {
       }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
     }
 
-    // action === 'tick'
+    // action === 'tick' or 'cron-tick'
+    // For 'cron-tick', run 4 ticks with 15s intervals inside one invocation
+    const isCronTick = action === 'cron-tick';
+    const source = body.source || (isCronTick ? 'cron' : 'ui');
+    const tickCount = isCronTick ? 4 : 1;
+    const tickResults: string[] = [];
 
+    for (let tickIdx = 0; tickIdx < tickCount; tickIdx++) {
+      if (tickIdx > 0) {
+        // Sleep 15 seconds between ticks
+        await new Promise(resolve => setTimeout(resolve, 15000));
+      }
+
+      const tickResult = await runSingleTick(supabase, supabaseUrl, anonKey, source);
+      tickResults.push(tickResult.action || tickResult.message || 'tick done');
+
+      // If tick caused a trade action (not just monitoring), the state changed
+      // Continue to next tick iteration regardless
+    }
+
+    return new Response(JSON.stringify({
+      success: true,
+      ticks: tickResults.length,
+      actions: tickResults,
+      action: tickResults[tickResults.length - 1],
+    }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+  } catch (error) {
+    console.error("Martingale bot error:", error);
+    return new Response(JSON.stringify({ success: false, error: error.message }), {
+      status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    });
+  }
+});
+
+// Single tick logic extracted into a function
+async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string, source: string): Promise<any> {
     // Market hours guard
     const nowIST_tick = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
     const tickHour = nowIST_tick.getHours();
