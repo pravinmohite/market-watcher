@@ -114,7 +114,7 @@ const Martingale = () => {
     onError: () => toast.error("Failed to save token"),
   });
 
-
+  const startBot = useMutation({
     mutationFn: async () => {
       const { data, error } = await supabase.functions.invoke("martingale-bot", {
         body: { action: "start", trading_mode: tradingMode, max_rounds: maxRounds },
