@@ -95,23 +95,6 @@ const Martingale = () => {
     },
     onError: () => toast.error("Failed to get Upstox auth URL"),
   });
-
-    mutationFn: async (token: string) => {
-      const { data, error } = await supabase.functions.invoke("upstox-auth", {
-        body: { action: "save-manual-token", access_token: token },
-      });
-      if (error) throw error;
-      return data;
-    },
-    onSuccess: (data) => {
-      toast.success(data?.message || "Token saved successfully!");
-      setManualToken("");
-      queryClient.invalidateQueries({ queryKey: ["upstox-status"] });
-      queryClient.invalidateQueries({ queryKey: ["martingale-status"] });
-    },
-    onError: () => toast.error("Failed to save token"),
-  });
-
   const startBot = useMutation({
     mutationFn: async () => {
       const { data, error } = await supabase.functions.invoke("martingale-bot", {
