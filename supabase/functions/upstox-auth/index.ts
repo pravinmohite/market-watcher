@@ -114,6 +114,41 @@ serve(async (req) => {
       }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
     }
 
+    // Save a manually pasted access token
+    if (action === 'save-manual-token') {
+      const accessToken = body.access_token;
+      if (!accessToken) {
+        return new Response(JSON.stringify({ success: false, error: 'No token provided' }), {
+          status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+
+      // Token valid until ~3:30 AM next day IST (approx 24h)
+      const expiresAt = new Date();
+      expiresAt.setHours(expiresAt.getHours() + 24);
+
+      await supabase.from('upstox_tokens').delete().lt('expires_at', new Date().toISOString());
+
+      const { error: insertErr } = await supabase.from('upstox_tokens').insert({
+        access_token: accessToken,
+        token_type: 'Bearer',
+        expires_at: expiresAt.toISOString(),
+      });
+
+      if (insertErr) {
+        console.error('Failed to store manual token:', insertErr);
+        return new Response(JSON.stringify({ success: false, error: 'Failed to store token' }), {
+          status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+
+      return new Response(JSON.stringify({
+        success: true,
+        message: 'Access token saved successfully',
+        expires_at: expiresAt.toISOString(),
+      }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+    }
+
     return new Response(JSON.stringify({ success: false, error: 'Unknown action' }), {
       status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });

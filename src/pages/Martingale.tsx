@@ -1,8 +1,9 @@
 import { useState, useEffect, useMemo } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
-import { Play, Square, RefreshCw, Zap, TrendingUp, TrendingDown, ArrowLeftRight, AlertTriangle, DollarSign, Activity, ArrowLeft, Link2, Unlink, Calendar, Filter } from "lucide-react";
+import { Play, Square, RefreshCw, Zap, TrendingUp, TrendingDown, ArrowLeftRight, AlertTriangle, DollarSign, Activity, ArrowLeft, Link2, Unlink, Calendar, Filter, Key } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { toast } from "sonner";
@@ -13,6 +14,7 @@ const Martingale = () => {
   const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
   const [roundFilter, setRoundFilter] = useState<string>("all");
+  const [manualToken, setManualToken] = useState<string>("");
 
   // Check for Upstox OAuth callback code in URL
   useEffect(() => {
@@ -93,6 +95,23 @@ const Martingale = () => {
       }
     },
     onError: () => toast.error("Failed to get Upstox auth URL"),
+  });
+
+  const saveManualToken = useMutation({
+    mutationFn: async (token: string) => {
+      const { data, error } = await supabase.functions.invoke("upstox-auth", {
+        body: { action: "save-manual-token", access_token: token },
+      });
+      if (error) throw error;
+      return data;
+    },
+    onSuccess: (data) => {
+      toast.success(data?.message || "Token saved successfully!");
+      setManualToken("");
+      queryClient.invalidateQueries({ queryKey: ["upstox-status"] });
+      queryClient.invalidateQueries({ queryKey: ["martingale-status"] });
+    },
+    onError: () => toast.error("Failed to save token"),
   });
 
   const startBot = useMutation({
@@ -327,7 +346,38 @@ const Martingale = () => {
           )}
         </div>
 
-        {/* Status Banner */}
+        {/* Manual Token Input */}
+        <div className="rounded-xl border border-border bg-card p-4">
+          <div className="flex items-center gap-2 mb-2">
+            <Key className="w-4 h-4 text-muted-foreground" />
+            <p className="text-sm font-medium text-foreground">Update Access Token</p>
+            <span className="text-xs text-muted-foreground">(paste daily Upstox token)</span>
+          </div>
+          <div className="flex gap-2">
+            <Input
+              type="password"
+              placeholder="Paste your Upstox access token here..."
+              value={manualToken}
+              onChange={(e) => setManualToken(e.target.value)}
+              className="flex-1 text-xs font-mono"
+            />
+            <Button
+              onClick={() => {
+                if (!manualToken.trim()) {
+                  toast.error("Please paste a token first");
+                  return;
+                }
+                saveManualToken.mutate(manualToken.trim());
+              }}
+              disabled={saveManualToken.isPending || !manualToken.trim()}
+              size="sm"
+              className="gap-1.5"
+            >
+              <Key className="w-3.5 h-3.5" />
+              {saveManualToken.isPending ? "Saving..." : "Save Token"}
+            </Button>
+          </div>
+        </div>
         <div className={cn(
           "rounded-xl border p-4",
           isActive ? "border-primary/30 bg-primary/5" : "border-border bg-card"
