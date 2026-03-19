@@ -65,7 +65,7 @@ const Martingale = () => {
       const { data: tickData } = await supabase.functions.invoke("martingale-bot", {
         body: { action: "tick", source: "ui" },
       });
-      if (tickData?.action && tickData.action !== lastTickAction && !tickData.action.startsWith('Monitoring') && !tickData.action.startsWith('Skipped')) {
+      if (tickData?.action && tickData.action !== lastTickAction && !tickData.action.startsWith('Monitoring') && !tickData.action.startsWith('Skipped') && !tickData.action.startsWith('Outside market hours')) {
         setLastTickAction(tickData.action);
         toast.info(tickData.action);
       }
