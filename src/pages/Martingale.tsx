@@ -13,7 +13,7 @@ const Martingale = () => {
   const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
   const [roundFilter, setRoundFilter] = useState<string>("all");
-  const [manualToken, setManualToken] = useState<string>("");
+  
 
   // Check for Upstox OAuth callback code in URL
   useEffect(() => {
