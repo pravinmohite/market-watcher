@@ -451,9 +451,7 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
     const marketClose = 15 * 60 + 30;
 
     if (tickTime < marketOpen || tickTime > marketClose) {
-      return new Response(JSON.stringify({ success: true, message: `Outside market hours (${tickHour}:${String(tickMinute).padStart(2, '0')} IST). Skipping tick.` }), {
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      });
+      return { success: true, message: `Outside market hours (${tickHour}:${String(tickMinute).padStart(2, '0')} IST). Skipping tick.` };
     }
 
     const { data: activeSession } = await supabase
@@ -463,10 +461,23 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
       .maybeSingle();
 
     if (!activeSession) {
-      return new Response(JSON.stringify({ success: true, message: 'No active session' }), {
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      });
+      return { success: true, message: 'No active session' };
     }
+
+    // Deduplication: skip if last tick was less than 10 seconds ago (from a different source)
+    if (activeSession.last_tick_at) {
+      const lastTickTime = new Date(activeSession.last_tick_at).getTime();
+      const now = Date.now();
+      const secondsSinceLastTick = (now - lastTickTime) / 1000;
+      if (secondsSinceLastTick < 10) {
+        return { success: true, message: `Skipped: last tick was ${secondsSinceLastTick.toFixed(0)}s ago (source: ${source})` };
+      }
+    }
+
+    // Update last_tick_at
+    await supabase.from('martingale_sessions').update({
+      last_tick_at: new Date().toISOString(),
+    }).eq('id', activeSession.id);
 
     const tradingMode = activeSession.trading_mode || 'paper';
     const isActual = tradingMode === 'actual';
@@ -479,9 +490,7 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
       .maybeSingle();
 
     if (!openTrade) {
-      return new Response(JSON.stringify({ success: true, message: 'No open trade in active session' }), {
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      });
+      return { success: true, message: 'No open trade in active session' };
     }
 
     // Check 3:25 PM auto square off
@@ -497,7 +506,6 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
       const exitPrice = sqPrice !== null ? sqPrice : openTrade.entry_price;
       const sqPnl = (exitPrice - openTrade.entry_price) * openTrade.lots * LOT_SIZE;
 
-      // Place sell order if actual trading
       if (isActual) {
         const accessToken = await getUpstoxToken(supabase);
         if (accessToken && sqInstrKey) {
@@ -522,9 +530,9 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
       const msg = `${modeLabel} 🕒 *3:25 PM Square Off*\nExited ${openTrade.option_type} ${openTrade.strike_price} @ ₹${exitPrice} (P&L: ₹${sqPnl.toFixed(0)})`;
       await sendTelegram(msg);
 
-      return new Response(JSON.stringify({
+      return {
         success: true, action: `🕒 3:25 PM Square Off! Exited ${openTrade.option_type} ${openTrade.strike_price} @ ₹${exitPrice} (P&L: ₹${sqPnl.toFixed(0)})`,
-      }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      };
     }
 
     const { specificPrice: currentPrice, specificInstrumentKey: currentInstrKey } = await fetchNiftyOptionChain(
@@ -532,9 +540,7 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
     );
 
     if (currentPrice === null) {
-      return new Response(JSON.stringify({ success: true, message: 'Could not fetch current price' }), {
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      });
+      return { success: true, message: 'Could not fetch current price' };
     }
 
     const pnlPercent = ((currentPrice - openTrade.entry_price) / openTrade.entry_price) * 100;
@@ -558,7 +564,6 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
 
       if (newPrice <= 0) { console.log(`Cannot start new session: ${newDirection} price is 0`); return; }
 
-      // Place buy order if actual trading
       if (isActual) {
         const accessToken = await getUpstoxToken(supabase);
         if (accessToken && newInstrKey) {
@@ -598,12 +603,9 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
         status: 'closed', exit_price: currentPrice, pnl: pnlAmount, exit_time: new Date().toISOString(),
       }).eq('id', openTrade.id).eq('status', 'open').select();
       if (!closeResult || closeResult.length === 0) {
-        return new Response(JSON.stringify({ success: true, message: 'Trade already processed by another tick' }), {
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        });
+        return { success: true, message: 'Trade already processed by another tick' };
       }
 
-      // Place sell order if actual trading
       if (isActual) {
         const accessToken = await getUpstoxToken(supabase);
         if (accessToken && currentInstrKey) {
@@ -631,12 +633,9 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
         status: 'closed', exit_price: currentPrice, pnl: pnlAmount, exit_time: new Date().toISOString(),
       }).eq('id', openTrade.id).eq('status', 'open').select();
       if (!closeResult || closeResult.length === 0) {
-        return new Response(JSON.stringify({ success: true, message: 'Trade already processed by another tick' }), {
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        });
+        return { success: true, message: 'Trade already processed by another tick' };
       }
 
-      // Place sell order if actual trading
       if (isActual) {
         const accessToken = await getUpstoxToken(supabase);
         if (accessToken && currentInstrKey) {
@@ -653,7 +652,6 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
       const newTotalPnl = activeSession.total_pnl + pnlAmount;
 
       if (newRound > activeSession.max_rounds) {
-        // Max rounds loss: STOP the bot completely - no new session
         await supabase.from('martingale_sessions').update({
           status: 'max_rounds_reached', total_pnl: newTotalPnl,
           completed_at: new Date().toISOString(), current_round: newRound - 1,
@@ -668,9 +666,7 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
 
         const { optionData } = await fetchNiftyOptionChain(supabaseUrl, anonKey);
         if (!optionData) {
-          return new Response(JSON.stringify({ success: false, message: 'Could not fetch new option data for next round' }), {
-            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-          });
+          return { success: false, message: 'Could not fetch new option data for next round' };
         }
 
         const newStrike = newOptionType === 'CE' ? optionData.otmCEStrike : optionData.otmPEStrike;
@@ -678,12 +674,9 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
         const newInstrKey = newOptionType === 'CE' ? optionData.otmCEInstrumentKey : optionData.otmPEInstrumentKey;
 
         if (newPrice <= 0) {
-          return new Response(JSON.stringify({ success: false, message: `Cannot enter round ${newRound}: option price is ₹0` }), {
-            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-          });
+          return { success: false, message: `Cannot enter round ${newRound}: option price is ₹0` };
         }
 
-        // Place buy order for next round if actual trading
         if (isActual) {
           const accessToken = await getUpstoxToken(supabase);
           if (accessToken && newInstrKey) {
@@ -694,9 +687,7 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
               price: newPrice,
             });
             if (!buyResult.success) {
-              return new Response(JSON.stringify({ success: false, message: `Round ${newRound} buy order failed: ${buyResult.error}` }), {
-                headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-              });
+              return { success: false, message: `Round ${newRound} buy order failed: ${buyResult.error}` };
             }
           }
         }
@@ -718,15 +709,8 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
       await sendTelegram(`📊 *Martingale Bot*\n\n${actionTaken}`);
     }
 
-    return new Response(JSON.stringify({
+    return {
       success: true, action: actionTaken,
       current_price: currentPrice, pnl_percent: pnlPercent, pnl_amount: pnlAmount,
-    }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
-
-  } catch (error) {
-    console.error("Martingale bot error:", error);
-    return new Response(JSON.stringify({ success: false, error: error.message }), {
-      status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-    });
-  }
-});
+    };
+}
