@@ -458,6 +458,7 @@ serve(async (req) => {
 
       const schedMMDD = String(nowIST_sched.getMonth() + 1).padStart(2, '0') + String(nowIST_sched.getDate()).padStart(2, '0');
       const isMarketDay = schedDay !== 0 && schedDay !== 6 && !NSE_HOLIDAYS.includes(schedMMDD);
+      const isExpiryDay = schedDay === 2; // Nifty weekly expiry is Tuesday (since Sept 2025)
 
       const AUTO_START_1 = 9 * 60 + 25;   // 9:25 AM
       const AUTO_STOP_1  = 11 * 60 + 15;  // 11:15 AM
@@ -470,10 +471,11 @@ serve(async (req) => {
         .eq('status', 'active')
         .maybeSingle();
 
-      // Auto-start at 9:25 AM or 2:30 PM (within a 1-minute window) — only on market days
+      // Auto-start at 9:25 AM or 2:30 PM — only on market days
+      // Skip 2:30 PM session on expiry day (Tuesday) due to high theta decay
       if (isMarketDay &&
           ((schedTime >= AUTO_START_1 && schedTime < AUTO_START_1 + 1) ||
-           (schedTime >= AUTO_START_2 && schedTime < AUTO_START_2 + 1))) {
+           (!isExpiryDay && schedTime >= AUTO_START_2 && schedTime < AUTO_START_2 + 1))) {
         if (!existingSession) {
           // Fetch saved settings from bot_settings
           const { data: settings } = await supabase.from('bot_settings').select('key, value');
