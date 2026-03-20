@@ -55,13 +55,26 @@ const Martingale = () => {
     refetchInterval: 60000,
   });
 
-  const [tradingMode, setTradingMode] = useState<'paper' | 'actual'>(() => {
-    return (localStorage.getItem('martingale_trading_mode') as 'paper' | 'actual') || 'paper';
+  const [tradingMode, setTradingMode] = useState<'paper' | 'actual'>('paper');
+  const [maxRounds, setMaxRounds] = useState<number>(5);
+
+  // Load saved settings from database
+  const { data: savedSettings } = useQuery({
+    queryKey: ["bot-settings"],
+    queryFn: async () => {
+      const { data } = await supabase.from("bot_settings" as any).select("key, value");
+      return data as unknown as { key: string; value: string }[] | null;
+    },
+    staleTime: Infinity,
   });
-  const [maxRounds, setMaxRounds] = useState<number>(() => {
-    const saved = localStorage.getItem('martingale_max_rounds');
-    return saved ? Number(saved) : 5;
-  });
+
+  useEffect(() => {
+    if (savedSettings) {
+      const map = Object.fromEntries(savedSettings.map((s) => [s.key, s.value]));
+      if (map.trading_mode === 'paper' || map.trading_mode === 'actual') setTradingMode(map.trading_mode);
+      if (map.max_rounds) setMaxRounds(Number(map.max_rounds));
+    }
+  }, [savedSettings]);
   const [lastTickAction, setLastTickAction] = useState<string | null>(null);
 
   const { data, isLoading, refetch } = useQuery({
@@ -228,7 +241,7 @@ const Martingale = () => {
                         }
                         toast.warning("⚠️ Actual trading mode: Real orders will be placed on your Upstox account!", { duration: 5000 });
                       }
-                      const mode = checked ? 'actual' : 'paper'; setTradingMode(mode); localStorage.setItem('martingale_trading_mode', mode);
+                      const mode = checked ? 'actual' : 'paper'; setTradingMode(mode); supabase.from("bot_settings" as any).upsert({ key: 'trading_mode', value: mode } as any, { onConflict: 'key' }).then();
                     }}
                   />
                   <span className={cn("text-xs font-medium", tradingMode === 'actual' ? "text-loss" : "text-muted-foreground")}>Actual</span>
@@ -237,7 +250,7 @@ const Martingale = () => {
                   <span className="text-xs text-muted-foreground">Rounds:</span>
                   <select
                     value={maxRounds}
-                    onChange={(e) => { const v = Number(e.target.value); setMaxRounds(v); localStorage.setItem('martingale_max_rounds', String(v)); }}
+                    onChange={(e) => { const v = Number(e.target.value); setMaxRounds(v); supabase.from("bot_settings" as any).upsert({ key: 'max_rounds', value: String(v) } as any, { onConflict: 'key' }).then(); }}
                     className="text-xs bg-muted border border-border rounded px-1.5 py-0.5 text-foreground"
                   >
                     {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(n => (
