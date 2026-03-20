@@ -55,8 +55,13 @@ const Martingale = () => {
     refetchInterval: 60000,
   });
 
-  const [tradingMode, setTradingMode] = useState<'paper' | 'actual'>('paper');
-  const [maxRounds, setMaxRounds] = useState<number>(5);
+  const [tradingMode, setTradingMode] = useState<'paper' | 'actual'>(() => {
+    return (localStorage.getItem('martingale_trading_mode') as 'paper' | 'actual') || 'paper';
+  });
+  const [maxRounds, setMaxRounds] = useState<number>(() => {
+    const saved = localStorage.getItem('martingale_max_rounds');
+    return saved ? Number(saved) : 5;
+  });
   const [lastTickAction, setLastTickAction] = useState<string | null>(null);
 
   const { data, isLoading, refetch } = useQuery({
