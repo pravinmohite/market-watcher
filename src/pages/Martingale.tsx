@@ -55,13 +55,26 @@ const Martingale = () => {
     refetchInterval: 60000,
   });
 
-  const [tradingMode, setTradingMode] = useState<'paper' | 'actual'>(() => {
-    return (localStorage.getItem('martingale_trading_mode') as 'paper' | 'actual') || 'paper';
+  const [tradingMode, setTradingMode] = useState<'paper' | 'actual'>('paper');
+  const [maxRounds, setMaxRounds] = useState<number>(5);
+
+  // Load saved settings from database
+  const { data: savedSettings } = useQuery({
+    queryKey: ["bot-settings"],
+    queryFn: async () => {
+      const { data } = await supabase.from("bot_settings" as any).select("key, value");
+      return data as { key: string; value: string }[] | null;
+    },
+    staleTime: Infinity,
   });
-  const [maxRounds, setMaxRounds] = useState<number>(() => {
-    const saved = localStorage.getItem('martingale_max_rounds');
-    return saved ? Number(saved) : 5;
-  });
+
+  useEffect(() => {
+    if (savedSettings) {
+      const map = Object.fromEntries(savedSettings.map((s) => [s.key, s.value]));
+      if (map.trading_mode === 'paper' || map.trading_mode === 'actual') setTradingMode(map.trading_mode);
+      if (map.max_rounds) setMaxRounds(Number(map.max_rounds));
+    }
+  }, [savedSettings]);
   const [lastTickAction, setLastTickAction] = useState<string | null>(null);
 
   const { data, isLoading, refetch } = useQuery({
