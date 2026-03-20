@@ -418,6 +418,46 @@ serve(async (req) => {
       const schedHour = nowIST_sched.getHours();
       const schedMinute = nowIST_sched.getMinutes();
       const schedTime = schedHour * 60 + schedMinute;
+      const schedDay = nowIST_sched.getDay(); // 0=Sun, 6=Sat
+
+      // NSE holidays 2025-2026 (MMDD format for easy matching)
+      const NSE_HOLIDAYS: string[] = [
+        // 2025
+        '0226', // Mahashivratri
+        '0314', // Holi
+        '0331', // Id-Ul-Fitr
+        '0410', // Shri Mahavir Jayanti
+        '0414', // Dr. Ambedkar Jayanti
+        '0418', // Good Friday
+        '0501', // Maharashtra Day
+        '0812', // Independence Day (observed)
+        '0815', // Independence Day
+        '0827', // Ganesh Chaturthi
+        '1002', // Mahatma Gandhi Jayanti
+        '1020', // Diwali (Laxmi Puja)
+        '1021', // Diwali Balipratipada
+        '1105', // Guru Nanak Jayanti (Prakash Utsav)
+        '1225', // Christmas
+        // 2026
+        '0126', // Republic Day
+        '0217', // Mahashivratri
+        '0310', // Holi (Dhuleti)
+        '0320', // Id-Ul-Fitr (subject to moon)
+        '0402', // Shri Mahavir Jayanti / Ram Navami
+        '0403', // Good Friday
+        '0414', // Dr. Ambedkar Jayanti
+        '0501', // Maharashtra Day
+        '0527', // Id-Ul-Adha (Bakri Id)
+        '0815', // Independence Day
+        '0817', // Ganesh Chaturthi
+        '1002', // Mahatma Gandhi Jayanti
+        '1009', // Diwali (Laxmi Puja)
+        '1026', // Guru Nanak Jayanti
+        '1225', // Christmas
+      ];
+
+      const schedMMDD = String(nowIST_sched.getMonth() + 1).padStart(2, '0') + String(nowIST_sched.getDate()).padStart(2, '0');
+      const isMarketDay = schedDay !== 0 && schedDay !== 6 && !NSE_HOLIDAYS.includes(schedMMDD);
 
       const AUTO_START_1 = 9 * 60 + 25;   // 9:25 AM
       const AUTO_STOP_1  = 11 * 60 + 15;  // 11:15 AM
@@ -430,9 +470,10 @@ serve(async (req) => {
         .eq('status', 'active')
         .maybeSingle();
 
-      // Auto-start at 9:25 AM or 2:30 PM (within a 1-minute window)
-      if ((schedTime >= AUTO_START_1 && schedTime < AUTO_START_1 + 1) ||
-          (schedTime >= AUTO_START_2 && schedTime < AUTO_START_2 + 1)) {
+      // Auto-start at 9:25 AM or 2:30 PM (within a 1-minute window) — only on market days
+      if (isMarketDay &&
+          ((schedTime >= AUTO_START_1 && schedTime < AUTO_START_1 + 1) ||
+           (schedTime >= AUTO_START_2 && schedTime < AUTO_START_2 + 1))) {
         if (!existingSession) {
           // Fetch saved settings from bot_settings
           const { data: settings } = await supabase.from('bot_settings').select('key, value');
