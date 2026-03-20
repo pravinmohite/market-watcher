@@ -63,7 +63,7 @@ const Martingale = () => {
     queryKey: ["bot-settings"],
     queryFn: async () => {
       const { data } = await supabase.from("bot_settings" as any).select("key, value");
-      return data as { key: string; value: string }[] | null;
+      return data as unknown as { key: string; value: string }[] | null;
     },
     staleTime: Infinity,
   });
