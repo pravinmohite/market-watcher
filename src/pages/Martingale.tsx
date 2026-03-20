@@ -237,7 +237,7 @@ const Martingale = () => {
                   <span className="text-xs text-muted-foreground">Rounds:</span>
                   <select
                     value={maxRounds}
-                    onChange={(e) => setMaxRounds(Number(e.target.value))}
+                    onChange={(e) => { const v = Number(e.target.value); setMaxRounds(v); localStorage.setItem('martingale_max_rounds', String(v)); }}
                     className="text-xs bg-muted border border-border rounded px-1.5 py-0.5 text-foreground"
                   >
                     {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(n => (
