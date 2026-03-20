@@ -412,6 +412,73 @@ serve(async (req) => {
     const tickCount = isCronTick ? 4 : 1;
     const tickResults: string[] = [];
 
+    // ========== AUTO-SCHEDULE LOGIC (only on cron-tick) ==========
+    if (isCronTick) {
+      const nowIST_sched = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+      const schedHour = nowIST_sched.getHours();
+      const schedMinute = nowIST_sched.getMinutes();
+      const schedTime = schedHour * 60 + schedMinute;
+
+      const AUTO_START_1 = 9 * 60 + 25;   // 9:25 AM
+      const AUTO_STOP_1  = 11 * 60 + 15;  // 11:15 AM
+      const AUTO_START_2 = 14 * 60 + 30;  // 2:30 PM
+      // 3:25 PM square-off is already handled inside runSingleTick
+
+      const { data: existingSession } = await supabase
+        .from('martingale_sessions')
+        .select('id, status')
+        .eq('status', 'active')
+        .maybeSingle();
+
+      // Auto-start at 9:25 AM or 2:30 PM (within a 1-minute window)
+      if ((schedTime >= AUTO_START_1 && schedTime < AUTO_START_1 + 1) ||
+          (schedTime >= AUTO_START_2 && schedTime < AUTO_START_2 + 1)) {
+        if (!existingSession) {
+          // Fetch saved settings from bot_settings
+          const { data: settings } = await supabase.from('bot_settings').select('key, value');
+          let savedMode = 'paper';
+          let savedMaxRounds = DEFAULT_MAX_ROUNDS;
+          if (settings) {
+            for (const s of settings) {
+              if (s.key === 'trading_mode') savedMode = s.value;
+              if (s.key === 'max_rounds') savedMaxRounds = Math.min(Math.max(parseInt(s.value) || DEFAULT_MAX_ROUNDS, 1), 10);
+            }
+          }
+
+          // Call start logic internally by making a self-request
+          const startRes = await fetch(`${supabaseUrl}/functions/v1/martingale-bot`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${anonKey}` },
+            body: JSON.stringify({ action: 'start', trading_mode: savedMode, max_rounds: savedMaxRounds }),
+          });
+          const startData = await startRes.json();
+          const timeLabel = schedTime >= AUTO_START_2 ? '2:30 PM' : '9:25 AM';
+          tickResults.push(`⏰ Auto-start (${timeLabel}): ${startData.message || 'started'}`);
+          await sendTelegram(`⏰ *Auto-Start (${timeLabel})*\n${startData.message || 'Bot started automatically'}`);
+        }
+      }
+
+      // Auto square-off + stop at 11:15 AM (within a 1-minute window)
+      if (schedTime >= AUTO_STOP_1 && schedTime < AUTO_STOP_1 + 1) {
+        if (existingSession) {
+          const stopRes = await fetch(`${supabaseUrl}/functions/v1/martingale-bot`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${anonKey}` },
+            body: JSON.stringify({ action: 'stop' }),
+          });
+          const stopData = await stopRes.json();
+          tickResults.push(`⏰ Auto-stop (11:15 AM): ${stopData.message || 'stopped'}`);
+          await sendTelegram(`⏰ *Auto-Stop (11:15 AM)*\nBot squared off and stopped automatically`);
+          // Skip ticks since we just stopped
+          return new Response(JSON.stringify({
+            success: true, ticks: tickResults.length, actions: tickResults,
+            action: tickResults[tickResults.length - 1],
+          }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
+      }
+    }
+    // ========== END AUTO-SCHEDULE ==========
+
     for (let tickIdx = 0; tickIdx < tickCount; tickIdx++) {
       if (tickIdx > 0) {
         // Sleep 15 seconds between ticks
@@ -420,9 +487,6 @@ serve(async (req) => {
 
       const tickResult = await runSingleTick(supabase, supabaseUrl, anonKey, source);
       tickResults.push(tickResult.action || tickResult.message || 'tick done');
-
-      // If tick caused a trade action (not just monitoring), the state changed
-      // Continue to next tick iteration regardless
     }
 
     return new Response(JSON.stringify({
