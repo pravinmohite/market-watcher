@@ -228,7 +228,7 @@ const Martingale = () => {
                         }
                         toast.warning("⚠️ Actual trading mode: Real orders will be placed on your Upstox account!", { duration: 5000 });
                       }
-                      setTradingMode(checked ? 'actual' : 'paper');
+                      const mode = checked ? 'actual' : 'paper'; setTradingMode(mode); localStorage.setItem('martingale_trading_mode', mode);
                     }}
                   />
                   <span className={cn("text-xs font-medium", tradingMode === 'actual' ? "text-loss" : "text-muted-foreground")}>Actual</span>
