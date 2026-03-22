@@ -237,6 +237,9 @@ serve(async (req) => {
         allTrades.sort((a: any, b: any) => new Date(b.entry_time).getTime() - new Date(a.entry_time).getTime());
       }
 
+      const dailyPnl = await getDailyPnl(supabase);
+      const dailyLossLimit = await getDailyLossLimit(supabase);
+
       return new Response(JSON.stringify({
         success: true,
         active_session: activeSession,
@@ -246,6 +249,8 @@ serve(async (req) => {
         option_data: optionData,
         recent_sessions: recentSessions || [],
         all_trades: allTrades,
+        daily_pnl: dailyPnl,
+        daily_loss_limit: dailyLossLimit,
       }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
     }
 
