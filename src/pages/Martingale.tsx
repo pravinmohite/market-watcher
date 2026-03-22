@@ -772,8 +772,31 @@ const DateWisePnL = ({ sessions, allTrades, sessionModeMap }: { sessions: any[];
           <p className="text-base md:text-lg font-bold font-mono text-loss">{lossDays}</p>
         </div>
       </div>
-      {/* Daily breakdown */}
-      <div className="overflow-x-auto rounded-xl border border-border">
+      {/* Daily breakdown - mobile cards */}
+      <div className="md:hidden space-y-2">
+        {dateData.map(([date, d]) => (
+          <div key={date} className="rounded-lg border border-border/50 bg-card p-2.5 flex items-center justify-between">
+            <div>
+              <p className="text-xs font-mono text-foreground">{date}</p>
+              <p className="text-[10px] text-muted-foreground">{d.sessions}S • {d.trades}T</p>
+            </div>
+            <div className="text-right">
+              <p className={cn("text-sm font-bold font-mono", d.pnl >= 0 ? "text-gain" : "text-loss")}>
+                ₹{d.pnl.toFixed(0)}
+              </p>
+              {hasActualTrades && (d.actualTrades > 0 || d.paperTrades > 0) && (
+                <p className="text-[9px] text-muted-foreground">
+                  {d.actualTrades > 0 && <span className={d.actualPnl >= 0 ? "text-gain" : "text-loss"}>🔴₹{d.actualPnl.toFixed(0)}</span>}
+                  {d.actualTrades > 0 && d.paperTrades > 0 && ' • '}
+                  {d.paperTrades > 0 && <span className={d.paperPnl >= 0 ? "text-gain" : "text-loss"}>📝₹{d.paperPnl.toFixed(0)}</span>}
+                </p>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+      {/* Daily breakdown - desktop table */}
+      <div className="hidden md:block overflow-x-auto rounded-xl border border-border">
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-border bg-muted/50">
