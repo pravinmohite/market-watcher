@@ -707,6 +707,16 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
     let actionTaken = `Monitoring: ${openTrade.option_type} ${openTrade.strike_price} @ ₹${currentPrice} (${pnlPercent.toFixed(2)}%)`;
 
     async function startNewSession(lastOptionType: string, lastPnl: number) {
+      // Daily loss limit check before starting new session
+      const dailyPnl = await getDailyPnl(supabase);
+      const dailyLossLimit = await getDailyLossLimit(supabase);
+      if (dailyPnl <= -dailyLossLimit) {
+        const msg = `⛔ Daily loss limit reached (₹${Math.abs(dailyPnl).toFixed(0)} / ₹${dailyLossLimit}). No new session will start.`;
+        console.log(msg);
+        await sendTelegram(`📊 *Martingale Bot*\n\n${msg}`);
+        return;
+      }
+
       const { optionData } = await fetchNiftyOptionChain(supabaseUrl, anonKey);
       if (!optionData) { console.log('Cannot start new session: no option data'); return; }
 
