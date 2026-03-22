@@ -171,6 +171,8 @@ const Martingale = () => {
   const isActive = activeSession?.status === 'active';
   const isUpstoxConnected = upstoxStatus?.connected;
   const dataSource = optionData?.source;
+  const dailyPnl = data?.daily_pnl ?? 0;
+  const serverDailyLossLimit = data?.daily_loss_limit ?? dailyLossLimit;
 
   // Build session mode lookup
   const sessionModeMap = useMemo(() => {
