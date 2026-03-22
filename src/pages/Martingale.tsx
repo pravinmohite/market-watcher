@@ -427,40 +427,40 @@ const Martingale = () => {
               <DollarSign className="w-4 h-4 text-primary" />
               Active Position
             </h2>
-            <div className="rounded-xl border border-primary/30 bg-card p-5">
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <div className="rounded-xl border border-primary/30 bg-card p-3 md:p-5">
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3 md:gap-4">
                 <div>
-                  <p className="text-xs text-muted-foreground mb-1">Option</p>
-                  <p className="text-lg font-bold font-mono text-foreground">
+                  <p className="text-[10px] md:text-xs text-muted-foreground mb-0.5 md:mb-1">Option</p>
+                  <p className="text-base md:text-lg font-bold font-mono text-foreground">
                     {activeTrade.strike_price} {activeTrade.option_type}
                   </p>
                 </div>
                 <div>
-                  <p className="text-xs text-muted-foreground mb-1">Lots</p>
-                  <p className="text-lg font-bold font-mono text-foreground">{activeTrade.lots}</p>
+                  <p className="text-[10px] md:text-xs text-muted-foreground mb-0.5 md:mb-1">Lots</p>
+                  <p className="text-base md:text-lg font-bold font-mono text-foreground">{activeTrade.lots}</p>
                 </div>
                 <div>
-                  <p className="text-xs text-muted-foreground mb-1">Entry → Current</p>
-                  <p className="text-lg font-bold font-mono text-foreground">
+                  <p className="text-[10px] md:text-xs text-muted-foreground mb-0.5 md:mb-1">Entry → Current</p>
+                  <p className="text-sm md:text-lg font-bold font-mono text-foreground">
                     ₹{Number(activeTrade.entry_price).toFixed(1)} → {currentPrice !== null ? `₹${currentPrice.toFixed(1)}` : '...'}
                   </p>
                 </div>
                 <div>
-                  <p className="text-xs text-muted-foreground mb-1">P&L</p>
+                  <p className="text-[10px] md:text-xs text-muted-foreground mb-0.5 md:mb-1">P&L</p>
                   {currentPnl !== null ? (
-                    <p className={cn("text-lg font-bold font-mono", currentPnl >= 0 ? "text-gain" : "text-loss")}>
+                    <p className={cn("text-base md:text-lg font-bold font-mono", currentPnl >= 0 ? "text-gain" : "text-loss")}>
                       {currentPnl >= 0 ? "+" : ""}{currentPnl.toFixed(2)}%
                     </p>
                   ) : (
-                    <p className="text-lg font-bold font-mono text-muted-foreground">--</p>
+                    <p className="text-base md:text-lg font-bold font-mono text-muted-foreground">--</p>
                   )}
                 </div>
               </div>
-              <div className="mt-4 flex items-center gap-4 text-xs text-muted-foreground">
+              <div className="mt-3 md:mt-4 flex flex-wrap items-center gap-2 md:gap-4 text-[10px] md:text-xs text-muted-foreground">
                 <span>Round {activeTrade.round}</span>
                 <span>Qty: {activeTrade.lots * 65}</span>
-                <span>Capital: ₹{(activeTrade.lots * 65 * Number(activeTrade.entry_price)).toFixed(0)}</span>
-                <span>Entered: {new Date(activeTrade.entry_time).toLocaleTimeString('en-IN')}</span>
+                <span>₹{(activeTrade.lots * 65 * Number(activeTrade.entry_price)).toFixed(0)}</span>
+                <span>{new Date(activeTrade.entry_time).toLocaleTimeString('en-IN')}</span>
               </div>
               {/* P&L Bar */}
               {currentPnl !== null && (
