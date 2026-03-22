@@ -210,7 +210,7 @@ const Martingale = () => {
       {/* Header */}
       <header className="border-b border-border sticky top-0 z-10 bg-background/80 backdrop-blur-xl">
         <div className="container mx-auto px-4 py-3 md:py-4">
-          {/* Top row: Logo + Action buttons */}
+          {/* Single row on desktop, stacked on mobile */}
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2 md:gap-3 min-w-0">
               <Link to="/" className="text-muted-foreground hover:text-foreground transition-colors shrink-0">
@@ -233,6 +233,52 @@ const Martingale = () => {
               </div>
             </div>
             <div className="flex items-center gap-1.5 md:gap-3 shrink-0">
+              {/* Settings inline on desktop only */}
+              {!isActive && (
+                <div className="hidden md:flex items-center gap-3">
+                  <div className="flex items-center gap-2">
+                    <span className={cn("text-xs font-medium", tradingMode === 'paper' ? "text-foreground" : "text-muted-foreground")}>Paper</span>
+                    <Switch
+                      checked={tradingMode === 'actual'}
+                      onCheckedChange={(checked) => {
+                        if (checked) {
+                          if (!isUpstoxConnected) {
+                            toast.error("Connect Upstox first before enabling actual trading");
+                            return;
+                          }
+                          toast.warning("⚠️ Actual trading mode: Real orders will be placed on your Upstox account!", { duration: 5000 });
+                        }
+                        const mode = checked ? 'actual' : 'paper'; setTradingMode(mode); supabase.from("bot_settings" as any).upsert({ key: 'trading_mode', value: mode } as any, { onConflict: 'key' }).then();
+                      }}
+                    />
+                    <span className={cn("text-xs font-medium", tradingMode === 'actual' ? "text-loss" : "text-muted-foreground")}>Actual</span>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-xs text-muted-foreground">Rounds:</span>
+                    <select
+                      value={maxRounds}
+                      onChange={(e) => { const v = Number(e.target.value); setMaxRounds(v); supabase.from("bot_settings" as any).upsert({ key: 'max_rounds', value: String(v) } as any, { onConflict: 'key' }).then(); }}
+                      className="text-xs bg-muted border border-border rounded px-1.5 py-0.5 text-foreground"
+                    >
+                      {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(n => (
+                        <option key={n} value={n}>{n}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-xs text-muted-foreground">Loss:</span>
+                    <select
+                      value={dailyLossLimit}
+                      onChange={(e) => { const v = Number(e.target.value); setDailyLossLimit(v); supabase.from("bot_settings" as any).upsert({ key: 'daily_loss_limit', value: String(v) } as any, { onConflict: 'key' }).then(); }}
+                      className="text-xs bg-muted border border-border rounded px-1.5 py-0.5 text-foreground"
+                    >
+                      {[5000, 8000, 10000, 12000, 15000, 20000, 25000, 30000].map(n => (
+                        <option key={n} value={n}>₹{(n/1000).toFixed(0)}K</option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+              )}
               {isActive && activeSession?.trading_mode && (
                 <span className={cn(
                   "px-1.5 md:px-2 py-0.5 md:py-1 rounded-full text-[10px] md:text-xs font-medium",
@@ -285,9 +331,9 @@ const Martingale = () => {
               </Button>
             </div>
           </div>
-          {/* Settings row - only when bot is stopped */}
+          {/* Settings row - mobile only */}
           {!isActive && (
-            <div className="flex flex-wrap items-center gap-x-4 gap-y-2 mt-2 pt-2 border-t border-border/50">
+            <div className="flex md:hidden flex-wrap items-center gap-x-4 gap-y-2 mt-2 pt-2 border-t border-border/50">
               <div className="flex items-center gap-2">
                 <span className={cn("text-xs font-medium", tradingMode === 'paper' ? "text-foreground" : "text-muted-foreground")}>Paper</span>
                 <Switch
@@ -331,7 +377,6 @@ const Martingale = () => {
               </div>
             </div>
           )}
-        </div>
       </header>
 
       <main className="container mx-auto px-3 md:px-4 py-4 md:py-6 space-y-4 md:space-y-6">
