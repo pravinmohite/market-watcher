@@ -261,6 +261,18 @@ const Martingale = () => {
                     ))}
                   </select>
                 </div>
+                <div className="flex items-center gap-1.5">
+                  <span className="text-xs text-muted-foreground">Loss Limit:</span>
+                  <select
+                    value={dailyLossLimit}
+                    onChange={(e) => { const v = Number(e.target.value); setDailyLossLimit(v); supabase.from("bot_settings" as any).upsert({ key: 'daily_loss_limit', value: String(v) } as any, { onConflict: 'key' }).then(); }}
+                    className="text-xs bg-muted border border-border rounded px-1.5 py-0.5 text-foreground"
+                  >
+                    {[5000, 8000, 10000, 12000, 15000, 20000, 25000, 30000].map(n => (
+                      <option key={n} value={n}>₹{(n/1000).toFixed(0)}K</option>
+                    ))}
+                  </select>
+                </div>
               </div>
             )}
             {isActive && activeSession?.trading_mode && (
