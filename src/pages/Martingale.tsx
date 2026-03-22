@@ -510,17 +510,16 @@ const Martingale = () => {
         {/* Date-wise P&L Summary (all days) */}
         <DateWisePnL sessions={recentSessions} allTrades={allTrades} sessionModeMap={sessionModeMap} />
 
-        {/* Trade History (last 2 days) */}
         <section>
           <div className="flex items-center justify-between mb-3">
-            <h2 className="text-base font-semibold text-foreground flex items-center gap-2">
+            <h2 className="text-sm md:text-base font-semibold text-foreground flex items-center gap-2">
               <Activity className="w-4 h-4 text-primary" />
-              Trade History <span className="text-xs font-normal text-muted-foreground">(Last 2 days)</span>
+              Trades <span className="text-[10px] md:text-xs font-normal text-muted-foreground">(2 days)</span>
             </h2>
-            <div className="flex items-center gap-2">
-              <Filter className="w-3.5 h-3.5 text-muted-foreground" />
+            <div className="flex items-center gap-1.5 md:gap-2">
+              <Filter className="w-3 h-3 md:w-3.5 md:h-3.5 text-muted-foreground" />
               <Select value={roundFilter} onValueChange={setRoundFilter}>
-                <SelectTrigger className="h-8 w-[120px] text-xs">
+                <SelectTrigger className="h-7 md:h-8 w-[90px] md:w-[120px] text-[10px] md:text-xs">
                   <SelectValue placeholder="All Rounds" />
                 </SelectTrigger>
                 <SelectContent>
@@ -535,73 +534,109 @@ const Martingale = () => {
             </div>
           </div>
           {recentTrades.length === 0 ? (
-            <p className="text-sm text-muted-foreground">No trades in the last 2 days.</p>
+            <p className="text-xs md:text-sm text-muted-foreground">No trades in the last 2 days.</p>
           ) : (
-            <div className="overflow-x-auto rounded-xl border border-border">
-              <table className="w-full text-sm">
-                 <thead>
-                  <tr className="border-b border-border bg-muted/50">
-                    <th className="text-left p-3 text-muted-foreground font-medium">Time</th>
-                    <th className="text-left p-3 text-muted-foreground font-medium">Mode</th>
-                    <th className="text-left p-3 text-muted-foreground font-medium">Round</th>
-                    <th className="text-left p-3 text-muted-foreground font-medium">Option</th>
-                    <th className="text-right p-3 text-muted-foreground font-medium">Lots</th>
-                    <th className="text-right p-3 text-muted-foreground font-medium">Qty</th>
-                    <th className="text-right p-3 text-muted-foreground font-medium">Capital</th>
-                    <th className="text-right p-3 text-muted-foreground font-medium">Entry</th>
-                    <th className="text-right p-3 text-muted-foreground font-medium">Exit</th>
-                    <th className="text-right p-3 text-muted-foreground font-medium">P&L</th>
-                    <th className="text-left p-3 text-muted-foreground font-medium">Status</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {recentTrades.map((trade: any) => (
-                    <tr key={trade.id} className="border-b border-border/50 hover:bg-muted/30 transition-colors">
-                      <td className="p-3 text-xs font-mono text-muted-foreground">
-                        {new Date(trade.entry_time).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}
-                      </td>
-                      <td className="p-3">
+            <>
+              {/* Mobile: Card view */}
+              <div className="md:hidden space-y-2">
+                {recentTrades.map((trade: any) => (
+                  <div key={trade.id} className="rounded-lg border border-border/50 bg-card p-3">
+                    <div className="flex items-center justify-between mb-2">
+                      <div className="flex items-center gap-1.5">
                         <span className={cn(
-                          "px-1.5 py-0.5 rounded-full text-xs font-medium",
-                          sessionModeMap[trade.session_id] === 'actual' ? "bg-loss/15 text-loss" : "bg-muted text-muted-foreground"
-                        )}>
-                          {sessionModeMap[trade.session_id] === 'actual' ? '🔴 Live' : '📝 Paper'}
-                        </span>
-                      </td>
-                      <td className="p-3 font-mono text-foreground">R{trade.round}</td>
-                      <td className="p-3 font-mono text-foreground">
-                        <span className={cn(
-                          "px-1.5 py-0.5 rounded text-xs font-medium",
+                          "px-1.5 py-0.5 rounded text-[10px] font-medium",
                           trade.option_type === 'CE' ? "bg-gain/15 text-gain" : "bg-loss/15 text-loss"
                         )}>
                           {trade.strike_price} {trade.option_type}
                         </span>
-                      </td>
-                      <td className="p-3 text-right font-mono text-foreground">{trade.lots}</td>
-                      <td className="p-3 text-right font-mono text-foreground">{trade.lots * 65}</td>
-                      <td className="p-3 text-right font-mono text-foreground">₹{(trade.lots * 65 * Number(trade.entry_price)).toFixed(0)}</td>
-                      <td className="p-3 text-right font-mono text-foreground">₹{Number(trade.entry_price).toFixed(1)}</td>
-                      <td className="p-3 text-right font-mono text-foreground">
-                        {trade.exit_price ? `₹${Number(trade.exit_price).toFixed(1)}` : '—'}
-                      </td>
-                      <td className={cn("p-3 text-right font-mono font-medium",
+                        <span className="text-[10px] font-mono text-muted-foreground">R{trade.round}</span>
+                        <span className={cn(
+                          "px-1 py-0.5 rounded-full text-[9px] font-medium",
+                          sessionModeMap[trade.session_id] === 'actual' ? "bg-loss/15 text-loss" : "bg-muted text-muted-foreground"
+                        )}>
+                          {sessionModeMap[trade.session_id] === 'actual' ? '🔴' : '📝'}
+                        </span>
+                      </div>
+                      <span className={cn("font-mono font-medium text-sm",
                         trade.pnl > 0 ? "text-gain" : trade.pnl < 0 ? "text-loss" : "text-muted-foreground"
                       )}>
                         {trade.pnl !== null ? `₹${Number(trade.pnl).toFixed(0)}` : '—'}
-                      </td>
-                      <td className="p-3">
-                        <span className={cn(
-                          "px-2 py-0.5 rounded-full text-xs font-medium",
-                          trade.status === 'open' ? "bg-primary/15 text-primary" : "bg-muted text-muted-foreground"
-                        )}>
-                          {trade.status}
-                        </span>
-                      </td>
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between text-[10px] text-muted-foreground">
+                      <span>{trade.lots}L • ₹{Number(trade.entry_price).toFixed(1)} → {trade.exit_price ? `₹${Number(trade.exit_price).toFixed(1)}` : '...'}</span>
+                      <span>{new Date(trade.entry_time).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              {/* Desktop: Table view */}
+              <div className="hidden md:block overflow-x-auto rounded-xl border border-border">
+                <table className="w-full text-sm">
+                   <thead>
+                    <tr className="border-b border-border bg-muted/50">
+                      <th className="text-left p-3 text-muted-foreground font-medium">Time</th>
+                      <th className="text-left p-3 text-muted-foreground font-medium">Mode</th>
+                      <th className="text-left p-3 text-muted-foreground font-medium">Round</th>
+                      <th className="text-left p-3 text-muted-foreground font-medium">Option</th>
+                      <th className="text-right p-3 text-muted-foreground font-medium">Lots</th>
+                      <th className="text-right p-3 text-muted-foreground font-medium">Qty</th>
+                      <th className="text-right p-3 text-muted-foreground font-medium">Capital</th>
+                      <th className="text-right p-3 text-muted-foreground font-medium">Entry</th>
+                      <th className="text-right p-3 text-muted-foreground font-medium">Exit</th>
+                      <th className="text-right p-3 text-muted-foreground font-medium">P&L</th>
+                      <th className="text-left p-3 text-muted-foreground font-medium">Status</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+                  </thead>
+                  <tbody>
+                    {recentTrades.map((trade: any) => (
+                      <tr key={trade.id} className="border-b border-border/50 hover:bg-muted/30 transition-colors">
+                        <td className="p-3 text-xs font-mono text-muted-foreground">
+                          {new Date(trade.entry_time).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}
+                        </td>
+                        <td className="p-3">
+                          <span className={cn(
+                            "px-1.5 py-0.5 rounded-full text-xs font-medium",
+                            sessionModeMap[trade.session_id] === 'actual' ? "bg-loss/15 text-loss" : "bg-muted text-muted-foreground"
+                          )}>
+                            {sessionModeMap[trade.session_id] === 'actual' ? '🔴 Live' : '📝 Paper'}
+                          </span>
+                        </td>
+                        <td className="p-3 font-mono text-foreground">R{trade.round}</td>
+                        <td className="p-3 font-mono text-foreground">
+                          <span className={cn(
+                            "px-1.5 py-0.5 rounded text-xs font-medium",
+                            trade.option_type === 'CE' ? "bg-gain/15 text-gain" : "bg-loss/15 text-loss"
+                          )}>
+                            {trade.strike_price} {trade.option_type}
+                          </span>
+                        </td>
+                        <td className="p-3 text-right font-mono text-foreground">{trade.lots}</td>
+                        <td className="p-3 text-right font-mono text-foreground">{trade.lots * 65}</td>
+                        <td className="p-3 text-right font-mono text-foreground">₹{(trade.lots * 65 * Number(trade.entry_price)).toFixed(0)}</td>
+                        <td className="p-3 text-right font-mono text-foreground">₹{Number(trade.entry_price).toFixed(1)}</td>
+                        <td className="p-3 text-right font-mono text-foreground">
+                          {trade.exit_price ? `₹${Number(trade.exit_price).toFixed(1)}` : '—'}
+                        </td>
+                        <td className={cn("p-3 text-right font-mono font-medium",
+                          trade.pnl > 0 ? "text-gain" : trade.pnl < 0 ? "text-loss" : "text-muted-foreground"
+                        )}>
+                          {trade.pnl !== null ? `₹${Number(trade.pnl).toFixed(0)}` : '—'}
+                        </td>
+                        <td className="p-3">
+                          <span className={cn(
+                            "px-2 py-0.5 rounded-full text-xs font-medium",
+                            trade.status === 'open' ? "bg-primary/15 text-primary" : "bg-muted text-muted-foreground"
+                          )}>
+                            {trade.status}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
           )}
         </section>
 
