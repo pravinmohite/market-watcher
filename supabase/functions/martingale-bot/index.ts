@@ -525,7 +525,12 @@ serve(async (req) => {
 
       // Auto-start at 9:25 AM or 2:30 PM — only on market days
       // Skip 2:30 PM session on expiry day (Tuesday) due to high theta decay
-      if (isMarketDay &&
+      // Skip auto-start if daily loss limit was already hit today
+      const dailyPnlSched = await getDailyPnl(supabase);
+      const dailyLossLimitSched = await getDailyLossLimit(supabase);
+      const isDailyLossHit = dailyPnlSched <= -dailyLossLimitSched;
+
+      if (isMarketDay && !isDailyLossHit &&
           ((schedTime >= AUTO_START_1 && schedTime < AUTO_START_1 + 1) ||
            (!isExpiryDay && schedTime >= AUTO_START_2 && schedTime < AUTO_START_2 + 1))) {
         if (!existingSession) {
