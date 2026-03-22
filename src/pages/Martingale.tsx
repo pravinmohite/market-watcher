@@ -643,24 +643,24 @@ const Martingale = () => {
         {/* Session History (last 2 days) */}
         {recentSess.length > 0 && (
           <section>
-            <h2 className="text-base font-semibold text-foreground mb-3">
-              Session History <span className="text-xs font-normal text-muted-foreground">(Last 2 days)</span>
+            <h2 className="text-sm md:text-base font-semibold text-foreground mb-3">
+              Session History <span className="text-[10px] md:text-xs font-normal text-muted-foreground">(2 days)</span>
             </h2>
             <div className="grid gap-2">
               {recentSess.map((session: any) => (
                 <div key={session.id} className={cn(
-                  "rounded-lg border bg-card p-3 flex items-center justify-between",
+                  "rounded-lg border bg-card p-2.5 md:p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-1.5 sm:gap-0",
                   session.trading_mode === 'actual' ? "border-loss/30" : "border-border"
                 )}>
-                  <div className="flex items-center gap-3">
+                  <div className="flex items-center gap-2 flex-wrap">
                     <span className={cn(
-                      "px-1.5 py-0.5 rounded-full text-xs font-medium",
+                      "px-1.5 py-0.5 rounded-full text-[10px] md:text-xs font-medium",
                       session.trading_mode === 'actual' ? "bg-loss/15 text-loss" : "bg-muted text-muted-foreground"
                     )}>
                       {session.trading_mode === 'actual' ? '🔴 Live' : '📝 Paper'}
                     </span>
                     <span className={cn(
-                      "px-2 py-0.5 rounded-full text-xs font-medium",
+                      "px-1.5 md:px-2 py-0.5 rounded-full text-[10px] md:text-xs font-medium",
                       session.status === 'active' ? "bg-primary/15 text-primary" :
                       session.status === 'completed' ? "bg-gain/15 text-gain" :
                       session.status === 'squared_off' ? "bg-warning/15 text-warning" :
