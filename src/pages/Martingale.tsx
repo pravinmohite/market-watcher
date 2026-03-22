@@ -668,17 +668,17 @@ const Martingale = () => {
                     )}>
                       {session.status === 'squared_off' ? '3:25 exit' : session.status}
                     </span>
-                    <span className="text-xs text-muted-foreground">
-                      Rounds: {session.current_round}/{session.max_rounds}
+                    <span className="text-[10px] md:text-xs text-muted-foreground">
+                      R{session.current_round}/{session.max_rounds}
                     </span>
                   </div>
-                  <div className="flex items-center gap-3">
-                    <span className={cn("font-mono font-medium text-sm",
+                  <div className="flex items-center gap-2 md:gap-3">
+                    <span className={cn("font-mono font-medium text-xs md:text-sm",
                       session.total_pnl >= 0 ? "text-gain" : "text-loss"
                     )}>
                       ₹{Number(session.total_pnl).toFixed(0)}
                     </span>
-                    <span className="text-xs text-muted-foreground">
+                    <span className="text-[10px] md:text-xs text-muted-foreground">
                       {new Date(session.created_at).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}
                     </span>
                   </div>
