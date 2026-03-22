@@ -7,6 +7,7 @@ import { useEffect, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import Index from "./pages/Index";
 import Martingale from "./pages/Martingale";
+import StockAnalysis from "./pages/StockAnalysis";
 import Login from "./pages/Login";
 import NotFound from "./pages/NotFound";
 
