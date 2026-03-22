@@ -58,6 +58,7 @@ const Martingale = () => {
 
   const [tradingMode, setTradingMode] = useState<'paper' | 'actual'>('paper');
   const [maxRounds, setMaxRounds] = useState<number>(5);
+  const [dailyLossLimit, setDailyLossLimit] = useState<number>(12000);
 
   // Load saved settings from database
   const { data: savedSettings } = useQuery({
