@@ -377,6 +377,7 @@ const Martingale = () => {
               </div>
             </div>
           )}
+        </div>
       </header>
 
       <main className="container mx-auto px-3 md:px-4 py-4 md:py-6 space-y-4 md:space-y-6">
