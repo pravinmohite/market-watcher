@@ -209,125 +209,128 @@ const Martingale = () => {
     <div className="min-h-screen bg-background">
       {/* Header */}
       <header className="border-b border-border sticky top-0 z-10 bg-background/80 backdrop-blur-xl">
-        <div className="container mx-auto px-4 py-4 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <Link to="/" className="text-muted-foreground hover:text-foreground transition-colors">
-              <ArrowLeft className="w-5 h-5" />
-            </Link>
-            <div className="w-10 h-10 rounded-xl bg-primary/15 flex items-center justify-center">
-              <Zap className="w-5 h-5 text-primary" />
-            </div>
-            <div>
-              <h1 className="text-lg font-bold text-foreground tracking-tight">Martingale Bot</h1>
-              <p className="text-xs text-muted-foreground">
-                {activeSession?.trading_mode === 'actual' ? (
-                  <span className="text-loss font-medium">🔴 Actual Trading</span>
-                ) : tradingMode === 'actual' ? (
-                  <span className="text-loss font-medium">🔴 Actual Mode Selected</span>
-                ) : (
-                  'Paper Trading'
-                )} • Nifty Weekly Options • Doubling Strategy
-              </p>
-            </div>
-          </div>
-          <div className="flex items-center gap-3">
-            {/* Trading Mode Toggle - only when bot is stopped */}
-            {!isActive && (
-              <div className="flex items-center gap-3">
-                <div className="flex items-center gap-2">
-                  <span className={cn("text-xs font-medium", tradingMode === 'paper' ? "text-foreground" : "text-muted-foreground")}>Paper</span>
-                  <Switch
-                    checked={tradingMode === 'actual'}
-                    onCheckedChange={(checked) => {
-                      if (checked) {
-                        if (!isUpstoxConnected) {
-                          toast.error("Connect Upstox first before enabling actual trading");
-                          return;
-                        }
-                        toast.warning("⚠️ Actual trading mode: Real orders will be placed on your Upstox account!", { duration: 5000 });
-                      }
-                      const mode = checked ? 'actual' : 'paper'; setTradingMode(mode); supabase.from("bot_settings" as any).upsert({ key: 'trading_mode', value: mode } as any, { onConflict: 'key' }).then();
-                    }}
-                  />
-                  <span className={cn("text-xs font-medium", tradingMode === 'actual' ? "text-loss" : "text-muted-foreground")}>Actual</span>
-                </div>
-                <div className="flex items-center gap-1.5">
-                  <span className="text-xs text-muted-foreground">Rounds:</span>
-                  <select
-                    value={maxRounds}
-                    onChange={(e) => { const v = Number(e.target.value); setMaxRounds(v); supabase.from("bot_settings" as any).upsert({ key: 'max_rounds', value: String(v) } as any, { onConflict: 'key' }).then(); }}
-                    className="text-xs bg-muted border border-border rounded px-1.5 py-0.5 text-foreground"
-                  >
-                    {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(n => (
-                      <option key={n} value={n}>{n}</option>
-                    ))}
-                  </select>
-                </div>
-                <div className="flex items-center gap-1.5">
-                  <span className="text-xs text-muted-foreground">Loss Limit:</span>
-                  <select
-                    value={dailyLossLimit}
-                    onChange={(e) => { const v = Number(e.target.value); setDailyLossLimit(v); supabase.from("bot_settings" as any).upsert({ key: 'daily_loss_limit', value: String(v) } as any, { onConflict: 'key' }).then(); }}
-                    className="text-xs bg-muted border border-border rounded px-1.5 py-0.5 text-foreground"
-                  >
-                    {[5000, 8000, 10000, 12000, 15000, 20000, 25000, 30000].map(n => (
-                      <option key={n} value={n}>₹{(n/1000).toFixed(0)}K</option>
-                    ))}
-                  </select>
-                </div>
+        <div className="container mx-auto px-4 py-3 md:py-4">
+          {/* Top row: Logo + Action buttons */}
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2 md:gap-3 min-w-0">
+              <Link to="/" className="text-muted-foreground hover:text-foreground transition-colors shrink-0">
+                <ArrowLeft className="w-5 h-5" />
+              </Link>
+              <div className="w-8 h-8 md:w-10 md:h-10 rounded-xl bg-primary/15 flex items-center justify-center shrink-0">
+                <Zap className="w-4 h-4 md:w-5 md:h-5 text-primary" />
               </div>
-            )}
-            {isActive && activeSession?.trading_mode && (
-              <span className={cn(
-                "px-2 py-1 rounded-full text-xs font-medium",
-                activeSession.trading_mode === 'actual' ? "bg-loss/15 text-loss" : "bg-muted text-muted-foreground"
-              )}>
-                {activeSession.trading_mode === 'actual' ? '🔴 LIVE' : '📝 Paper'}
-              </span>
-            )}
-            {isActive ? (
-              <>
-                <Button onClick={() => tickBot.mutate()} disabled={tickBot.isPending} variant="outline" size="sm" className="gap-1.5">
-                  <RefreshCw className={cn("w-3.5 h-3.5", tickBot.isPending && "animate-spin")} />
-                  Tick
-                </Button>
-                <Button onClick={() => stopBot.mutate()} disabled={stopBot.isPending} variant="destructive" size="sm" className="gap-1.5">
-                  <Square className="w-3.5 h-3.5" />
-                  Stop
-                </Button>
-              </>
-            ) : (
-              <Button
-                onClick={() => {
-                  if (tradingMode === 'actual') {
-                    if (confirm('⚠️ You are about to start ACTUAL TRADING. Real orders will be placed on your Upstox account. Continue?')) {
+              <div className="min-w-0">
+                <h1 className="text-sm md:text-lg font-bold text-foreground tracking-tight truncate">Martingale Bot</h1>
+                <p className="text-[10px] md:text-xs text-muted-foreground truncate">
+                  {activeSession?.trading_mode === 'actual' ? (
+                    <span className="text-loss font-medium">🔴 Actual Trading</span>
+                  ) : tradingMode === 'actual' ? (
+                    <span className="text-loss font-medium">🔴 Actual Mode Selected</span>
+                  ) : (
+                    'Paper Trading'
+                  )} • Nifty Weekly
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-1.5 md:gap-3 shrink-0">
+              {isActive && activeSession?.trading_mode && (
+                <span className={cn(
+                  "px-1.5 md:px-2 py-0.5 md:py-1 rounded-full text-[10px] md:text-xs font-medium",
+                  activeSession.trading_mode === 'actual' ? "bg-loss/15 text-loss" : "bg-muted text-muted-foreground"
+                )}>
+                  {activeSession.trading_mode === 'actual' ? '🔴 LIVE' : '📝 Paper'}
+                </span>
+              )}
+              {isActive ? (
+                <>
+                  <Button onClick={() => tickBot.mutate()} disabled={tickBot.isPending} variant="outline" size="sm" className="gap-1 md:gap-1.5 h-8 px-2 md:px-3 text-xs">
+                    <RefreshCw className={cn("w-3 h-3 md:w-3.5 md:h-3.5", tickBot.isPending && "animate-spin")} />
+                    <span className="hidden sm:inline">Tick</span>
+                  </Button>
+                  <Button onClick={() => stopBot.mutate()} disabled={stopBot.isPending} variant="destructive" size="sm" className="gap-1 md:gap-1.5 h-8 px-2 md:px-3 text-xs">
+                    <Square className="w-3 h-3 md:w-3.5 md:h-3.5" />
+                    <span className="hidden sm:inline">Stop</span>
+                  </Button>
+                </>
+              ) : (
+                <Button
+                  onClick={() => {
+                    if (tradingMode === 'actual') {
+                      if (confirm('⚠️ You are about to start ACTUAL TRADING. Real orders will be placed on your Upstox account. Continue?')) {
+                        startBot.mutate();
+                      }
+                    } else {
                       startBot.mutate();
                     }
-                  } else {
-                    startBot.mutate();
-                  }
-                }}
-                disabled={startBot.isPending}
+                  }}
+                  disabled={startBot.isPending}
+                  size="sm"
+                  className={cn("gap-1 md:gap-1.5 h-8 px-2 md:px-3 text-xs", tradingMode === 'actual' && "bg-loss hover:bg-loss/90")}
+                >
+                  <Play className="w-3 h-3 md:w-3.5 md:h-3.5" />
+                  {startBot.isPending ? "..." : tradingMode === 'actual' ? "Start LIVE" : "Start"}
+                </Button>
+              )}
+              <Button
+                variant="ghost"
                 size="sm"
-                className={cn("gap-1.5", tradingMode === 'actual' && "bg-loss hover:bg-loss/90")}
+                className="gap-1 text-muted-foreground h-8 px-2 md:px-3"
+                onClick={async () => {
+                  await supabase.auth.signOut();
+                  navigate("/login", { replace: true });
+                }}
               >
-                <Play className="w-3.5 h-3.5" />
-                {startBot.isPending ? "Starting..." : tradingMode === 'actual' ? "Start LIVE" : "Start Bot"}
+                <LogOut className="w-3 h-3 md:w-3.5 md:h-3.5" />
+                <span className="hidden sm:inline text-xs">Logout</span>
               </Button>
-            )}
-            <Button
-              variant="ghost"
-              size="sm"
-              className="gap-1.5 text-muted-foreground"
-              onClick={async () => {
-                await supabase.auth.signOut();
-                navigate("/login", { replace: true });
-              }}
-            >
-              <LogOut className="w-3.5 h-3.5" />
-              Logout
-            </Button>
+            </div>
           </div>
+          {/* Settings row - only when bot is stopped */}
+          {!isActive && (
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-2 mt-2 pt-2 border-t border-border/50">
+              <div className="flex items-center gap-2">
+                <span className={cn("text-xs font-medium", tradingMode === 'paper' ? "text-foreground" : "text-muted-foreground")}>Paper</span>
+                <Switch
+                  checked={tradingMode === 'actual'}
+                  onCheckedChange={(checked) => {
+                    if (checked) {
+                      if (!isUpstoxConnected) {
+                        toast.error("Connect Upstox first before enabling actual trading");
+                        return;
+                      }
+                      toast.warning("⚠️ Actual trading mode: Real orders will be placed on your Upstox account!", { duration: 5000 });
+                    }
+                    const mode = checked ? 'actual' : 'paper'; setTradingMode(mode); supabase.from("bot_settings" as any).upsert({ key: 'trading_mode', value: mode } as any, { onConflict: 'key' }).then();
+                  }}
+                />
+                <span className={cn("text-xs font-medium", tradingMode === 'actual' ? "text-loss" : "text-muted-foreground")}>Actual</span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <span className="text-xs text-muted-foreground">Rounds:</span>
+                <select
+                  value={maxRounds}
+                  onChange={(e) => { const v = Number(e.target.value); setMaxRounds(v); supabase.from("bot_settings" as any).upsert({ key: 'max_rounds', value: String(v) } as any, { onConflict: 'key' }).then(); }}
+                  className="text-xs bg-muted border border-border rounded px-1.5 py-0.5 text-foreground"
+                >
+                  {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(n => (
+                    <option key={n} value={n}>{n}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <span className="text-xs text-muted-foreground">Loss Limit:</span>
+                <select
+                  value={dailyLossLimit}
+                  onChange={(e) => { const v = Number(e.target.value); setDailyLossLimit(v); supabase.from("bot_settings" as any).upsert({ key: 'daily_loss_limit', value: String(v) } as any, { onConflict: 'key' }).then(); }}
+                  className="text-xs bg-muted border border-border rounded px-1.5 py-0.5 text-foreground"
+                >
+                  {[5000, 8000, 10000, 12000, 15000, 20000, 25000, 30000].map(n => (
+                    <option key={n} value={n}>₹{(n/1000).toFixed(0)}K</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+          )}
         </div>
       </header>
 
