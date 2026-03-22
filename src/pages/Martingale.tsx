@@ -58,6 +58,7 @@ const Martingale = () => {
 
   const [tradingMode, setTradingMode] = useState<'paper' | 'actual'>('paper');
   const [maxRounds, setMaxRounds] = useState<number>(5);
+  const [dailyLossLimit, setDailyLossLimit] = useState<number>(12000);
 
   // Load saved settings from database
   const { data: savedSettings } = useQuery({
@@ -74,6 +75,7 @@ const Martingale = () => {
       const map = Object.fromEntries(savedSettings.map((s) => [s.key, s.value]));
       if (map.trading_mode === 'paper' || map.trading_mode === 'actual') setTradingMode(map.trading_mode);
       if (map.max_rounds) setMaxRounds(Number(map.max_rounds));
+      if (map.daily_loss_limit) setDailyLossLimit(Number(map.daily_loss_limit));
     }
   }, [savedSettings]);
   const [lastTickAction, setLastTickAction] = useState<string | null>(null);
@@ -169,6 +171,8 @@ const Martingale = () => {
   const isActive = activeSession?.status === 'active';
   const isUpstoxConnected = upstoxStatus?.connected;
   const dataSource = optionData?.source;
+  const dailyPnl = data?.daily_pnl ?? 0;
+  const serverDailyLossLimit = data?.daily_loss_limit ?? dailyLossLimit;
 
   // Build session mode lookup
   const sessionModeMap = useMemo(() => {
@@ -256,6 +260,18 @@ const Martingale = () => {
                   >
                     {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(n => (
                       <option key={n} value={n}>{n}</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <span className="text-xs text-muted-foreground">Loss Limit:</span>
+                  <select
+                    value={dailyLossLimit}
+                    onChange={(e) => { const v = Number(e.target.value); setDailyLossLimit(v); supabase.from("bot_settings" as any).upsert({ key: 'daily_loss_limit', value: String(v) } as any, { onConflict: 'key' }).then(); }}
+                    className="text-xs bg-muted border border-border rounded px-1.5 py-0.5 text-foreground"
+                  >
+                    {[5000, 8000, 10000, 12000, 15000, 20000, 25000, 30000].map(n => (
+                      <option key={n} value={n}>₹{(n/1000).toFixed(0)}K</option>
                     ))}
                   </select>
                 </div>
@@ -379,6 +395,12 @@ const Martingale = () => {
                 </span>
               </span>
             )}
+            <span className="text-xs text-muted-foreground ml-auto">
+              Today's P&L: <span className={cn("font-mono font-medium", dailyPnl >= 0 ? "text-gain" : "text-loss")}>
+                ₹{dailyPnl.toFixed(0)}
+              </span>
+              <span className="text-muted-foreground"> / -₹{(serverDailyLossLimit/1000).toFixed(0)}K limit</span>
+            </span>
           </div>
         </div>
 

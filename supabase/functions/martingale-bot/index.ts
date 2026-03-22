@@ -10,6 +10,43 @@ const LOT_SIZE = 65;
 const PROFIT_TARGET = 2.5;
 const LOSS_LIMIT = 2;
 const DEFAULT_MAX_ROUNDS = 5;
+const DEFAULT_DAILY_LOSS_LIMIT = 12000;
+
+async function getDailyPnl(supabase: any): Promise<number> {
+  // Get today's date in IST
+  const nowIST = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+  const todayStart = new Date(nowIST);
+  todayStart.setHours(0, 0, 0, 0);
+  // Convert back to UTC for DB query
+  const todayUTC = new Date(todayStart.getTime() - (5.5 * 60 * 60 * 1000));
+
+  const { data: todaySessions } = await supabase
+    .from('martingale_sessions')
+    .select('id, total_pnl, status')
+    .gte('created_at', todayUTC.toISOString())
+    .neq('status', 'active');
+
+  let dailyPnl = 0;
+  if (todaySessions) {
+    for (const s of todaySessions) {
+      dailyPnl += Number(s.total_pnl) || 0;
+    }
+  }
+  return dailyPnl;
+}
+
+async function getDailyLossLimit(supabase: any): Promise<number> {
+  const { data } = await supabase
+    .from('bot_settings')
+    .select('value')
+    .eq('key', 'daily_loss_limit')
+    .maybeSingle();
+  if (data?.value) {
+    const val = parseInt(data.value);
+    if (!isNaN(val) && val > 0) return val;
+  }
+  return DEFAULT_DAILY_LOSS_LIMIT;
+}
 
 interface OptionChainData {
   niftySpot: number;
@@ -200,6 +237,9 @@ serve(async (req) => {
         allTrades.sort((a: any, b: any) => new Date(b.entry_time).getTime() - new Date(a.entry_time).getTime());
       }
 
+      const dailyPnl = await getDailyPnl(supabase);
+      const dailyLossLimit = await getDailyLossLimit(supabase);
+
       return new Response(JSON.stringify({
         success: true,
         active_session: activeSession,
@@ -209,6 +249,8 @@ serve(async (req) => {
         option_data: optionData,
         recent_sessions: recentSessions || [],
         all_trades: allTrades,
+        daily_pnl: dailyPnl,
+        daily_loss_limit: dailyLossLimit,
       }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
     }
 
@@ -271,6 +313,16 @@ serve(async (req) => {
     if (action === 'start') {
       const tradingMode = body.trading_mode || 'paper';
       const maxRounds = Math.min(Math.max(parseInt(body.max_rounds) || DEFAULT_MAX_ROUNDS, 1), 10);
+
+      // Daily loss limit check
+      const dailyPnl = await getDailyPnl(supabase);
+      const dailyLossLimit = await getDailyLossLimit(supabase);
+      if (dailyPnl <= -dailyLossLimit) {
+        return new Response(JSON.stringify({
+          success: false,
+          message: `Daily loss limit reached (₹${Math.abs(dailyPnl).toFixed(0)} / ₹${dailyLossLimit}). Bot will not start today.`,
+        }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
 
       // Market hours guard
       const nowIST_start = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
@@ -655,6 +707,16 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
     let actionTaken = `Monitoring: ${openTrade.option_type} ${openTrade.strike_price} @ ₹${currentPrice} (${pnlPercent.toFixed(2)}%)`;
 
     async function startNewSession(lastOptionType: string, lastPnl: number) {
+      // Daily loss limit check before starting new session
+      const dailyPnl = await getDailyPnl(supabase);
+      const dailyLossLimit = await getDailyLossLimit(supabase);
+      if (dailyPnl <= -dailyLossLimit) {
+        const msg = `⛔ Daily loss limit reached (₹${Math.abs(dailyPnl).toFixed(0)} / ₹${dailyLossLimit}). No new session will start.`;
+        console.log(msg);
+        await sendTelegram(`📊 *Martingale Bot*\n\n${msg}`);
+        return;
+      }
+
       const { optionData } = await fetchNiftyOptionChain(supabaseUrl, anonKey);
       if (!optionData) { console.log('Cannot start new session: no option data'); return; }
 
@@ -758,14 +820,23 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
       const newRound = activeSession.current_round + 1;
       const newTotalPnl = activeSession.total_pnl + pnlAmount;
 
-      if (newRound > activeSession.max_rounds) {
+      // Check daily loss limit before proceeding to next round
+      const dailyPnlOnLoss = await getDailyPnl(supabase) + newTotalPnl; // include current session's updated pnl
+      const dailyLossLimitOnLoss = await getDailyLossLimit(supabase);
+
+      if (newRound > activeSession.max_rounds || dailyPnlOnLoss <= -dailyLossLimitOnLoss) {
+        const reason = newRound > activeSession.max_rounds
+          ? `MAX ROUNDS (${activeSession.max_rounds}) reached`
+          : `Daily loss limit reached (₹${Math.abs(dailyPnlOnLoss).toFixed(0)} / ₹${dailyLossLimitOnLoss})`;
+
         await supabase.from('martingale_sessions').update({
-          status: 'max_rounds_reached', total_pnl: newTotalPnl,
+          status: newRound > activeSession.max_rounds ? 'max_rounds_reached' : 'daily_loss_limit',
+          total_pnl: newTotalPnl,
           completed_at: new Date().toISOString(), current_round: newRound - 1,
         }).eq('id', activeSession.id);
 
         const modeLabel = isActual ? '🔴' : '📝';
-        actionTaken = `${modeLabel} ⛔ MAX ROUNDS (${activeSession.max_rounds}) reached. Session P&L: ₹${newTotalPnl.toFixed(0)}. Bot stopped — manual restart required.`;
+        actionTaken = `${modeLabel} ⛔ ${reason}. Session P&L: ₹${newTotalPnl.toFixed(0)}. Bot stopped — manual restart required.`;
         await sendTelegram(`📊 *Martingale Bot*\n\n${actionTaken}`);
       } else {
         const newOptionType = openTrade.option_type === 'CE' ? 'PE' : 'CE';
