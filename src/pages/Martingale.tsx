@@ -299,6 +299,18 @@ const Martingale = () => {
                 {startBot.isPending ? "Starting..." : tradingMode === 'actual' ? "Start LIVE" : "Start Bot"}
               </Button>
             )}
+            <Button
+              variant="ghost"
+              size="sm"
+              className="gap-1.5 text-muted-foreground"
+              onClick={async () => {
+                await supabase.auth.signOut();
+                navigate("/login", { replace: true });
+              }}
+            >
+              <LogOut className="w-3.5 h-3.5" />
+              Logout
+            </Button>
           </div>
         </div>
       </header>
