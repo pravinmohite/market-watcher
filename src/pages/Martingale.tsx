@@ -75,6 +75,7 @@ const Martingale = () => {
       const map = Object.fromEntries(savedSettings.map((s) => [s.key, s.value]));
       if (map.trading_mode === 'paper' || map.trading_mode === 'actual') setTradingMode(map.trading_mode);
       if (map.max_rounds) setMaxRounds(Number(map.max_rounds));
+      if (map.daily_loss_limit) setDailyLossLimit(Number(map.daily_loss_limit));
     }
   }, [savedSettings]);
   const [lastTickAction, setLastTickAction] = useState<string | null>(null);
