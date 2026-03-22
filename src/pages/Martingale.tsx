@@ -488,23 +488,21 @@ const Martingale = () => {
         )}
 
         {/* Strategy Explanation */}
-        <section className="rounded-xl border border-border bg-card p-5">
-          <h2 className="text-base font-semibold text-foreground mb-3 flex items-center gap-2">
+        <section className="rounded-xl border border-border bg-card p-3 md:p-5">
+          <h2 className="text-sm md:text-base font-semibold text-foreground mb-2 md:mb-3 flex items-center gap-2">
             <AlertTriangle className="w-4 h-4 text-warning" />
             Strategy Rules
           </h2>
-          <div className="grid md:grid-cols-2 gap-3 text-sm text-muted-foreground">
-            <div className="space-y-2">
-              <p>1️⃣ Smart entry: <strong className="text-foreground">follows last winning direction</strong> (trend-based for first session)</p>
-              <p>2️⃣ If <span className="text-loss font-medium">-2%</span> → exit, <strong className="text-foreground">flip direction & double lots</strong></p>
-              <p>3️⃣ Continue flipping & doubling (max <strong className="text-foreground">{isActive ? activeSession?.max_rounds : maxRounds} rounds</strong>)</p>
+          <div className="grid md:grid-cols-2 gap-2 md:gap-3 text-xs md:text-sm text-muted-foreground">
+            <div className="space-y-1.5 md:space-y-2">
+              <p>1️⃣ Smart entry: <strong className="text-foreground">follows last winning direction</strong></p>
+              <p>2️⃣ If <span className="text-loss font-medium">-2%</span> → exit, <strong className="text-foreground">flip & double</strong></p>
+              <p>3️⃣ Continue (max <strong className="text-foreground">{isActive ? activeSession?.max_rounds : maxRounds} rounds</strong>)</p>
             </div>
-            <div className="space-y-2">
-              <p>🎯 <span className="text-gain font-medium">+2.5%</span> profit → exit & restart fresh</p>
-              <p>⛔ Max rounds reached → <strong className="text-foreground">bot stops, manual restart required</strong></p>
+            <div className="space-y-1.5 md:space-y-2">
+              <p>🎯 <span className="text-gain font-medium">+2.5%</span> profit → exit & restart</p>
+              <p>⛔ Max rounds → <strong className="text-foreground">bot stops</strong></p>
               <p>🕒 Auto square-off at <strong className="text-foreground">3:25 PM</strong></p>
-              <p>🔄 Toggle between <strong className="text-foreground">paper & actual trading</strong></p>
-              <p>⚙️ Lot size: 65 (Nifty) • Weekly expiry</p>
             </div>
           </div>
         </section>
