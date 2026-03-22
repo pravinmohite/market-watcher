@@ -841,12 +841,12 @@ const DateWisePnL = ({ sessions, allTrades, sessionModeMap }: { sessions: any[];
 };
 
 const MartingaleStatCard = ({ icon, label, value }: { icon: React.ReactNode; label: string; value: string }) => (
-  <div className="rounded-xl border border-border p-3 bg-card">
-    <div className="flex items-center gap-1.5 text-muted-foreground mb-1">
+  <div className="rounded-xl border border-border p-2 md:p-3 bg-card">
+    <div className="flex items-center gap-1 md:gap-1.5 text-muted-foreground mb-0.5 md:mb-1">
       {icon}
-      <span className="text-xs">{label}</span>
+      <span className="text-[10px] md:text-xs">{label}</span>
     </div>
-    <p className="text-sm font-bold font-mono text-foreground">{value}</p>
+    <p className="text-xs md:text-sm font-bold font-mono text-foreground truncate">{value}</p>
   </div>
 );
 
