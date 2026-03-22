@@ -395,6 +395,12 @@ const Martingale = () => {
                 </span>
               </span>
             )}
+            <span className="text-xs text-muted-foreground ml-auto">
+              Today's P&L: <span className={cn("font-mono font-medium", dailyPnl >= 0 ? "text-gain" : "text-loss")}>
+                ₹{dailyPnl.toFixed(0)}
+              </span>
+              <span className="text-muted-foreground"> / -₹{(serverDailyLossLimit/1000).toFixed(0)}K limit</span>
+            </span>
           </div>
         </div>
 
