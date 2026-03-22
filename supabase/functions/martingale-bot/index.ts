@@ -10,6 +10,43 @@ const LOT_SIZE = 65;
 const PROFIT_TARGET = 2.5;
 const LOSS_LIMIT = 2;
 const DEFAULT_MAX_ROUNDS = 5;
+const DEFAULT_DAILY_LOSS_LIMIT = 12000;
+
+async function getDailyPnl(supabase: any): Promise<number> {
+  // Get today's date in IST
+  const nowIST = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+  const todayStart = new Date(nowIST);
+  todayStart.setHours(0, 0, 0, 0);
+  // Convert back to UTC for DB query
+  const todayUTC = new Date(todayStart.getTime() - (5.5 * 60 * 60 * 1000));
+
+  const { data: todaySessions } = await supabase
+    .from('martingale_sessions')
+    .select('id, total_pnl, status')
+    .gte('created_at', todayUTC.toISOString())
+    .neq('status', 'active');
+
+  let dailyPnl = 0;
+  if (todaySessions) {
+    for (const s of todaySessions) {
+      dailyPnl += Number(s.total_pnl) || 0;
+    }
+  }
+  return dailyPnl;
+}
+
+async function getDailyLossLimit(supabase: any): Promise<number> {
+  const { data } = await supabase
+    .from('bot_settings')
+    .select('value')
+    .eq('key', 'daily_loss_limit')
+    .maybeSingle();
+  if (data?.value) {
+    const val = parseInt(data.value);
+    if (!isNaN(val) && val > 0) return val;
+  }
+  return DEFAULT_DAILY_LOSS_LIMIT;
+}
 
 interface OptionChainData {
   niftySpot: number;
