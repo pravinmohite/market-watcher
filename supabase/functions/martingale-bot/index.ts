@@ -314,15 +314,6 @@ serve(async (req) => {
       const tradingMode = body.trading_mode || 'paper';
       const maxRounds = Math.min(Math.max(parseInt(body.max_rounds) || DEFAULT_MAX_ROUNDS, 1), 10);
 
-      // Daily loss limit check
-      const dailyPnl = await getDailyPnl(supabase);
-      const dailyLossLimit = await getDailyLossLimit(supabase);
-      if (dailyPnl <= -dailyLossLimit) {
-        return new Response(JSON.stringify({
-          success: false,
-          message: `Daily loss limit reached (₹${Math.abs(dailyPnl).toFixed(0)} / ₹${dailyLossLimit}). Bot will not start today.`,
-        }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
-      }
 
       // Market hours guard
       const nowIST_start = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
@@ -525,7 +516,12 @@ serve(async (req) => {
 
       // Auto-start at 9:25 AM or 2:30 PM — only on market days
       // Skip 2:30 PM session on expiry day (Tuesday) due to high theta decay
-      if (isMarketDay &&
+      // Skip auto-start if daily loss limit was already hit today
+      const dailyPnlSched = await getDailyPnl(supabase);
+      const dailyLossLimitSched = await getDailyLossLimit(supabase);
+      const isDailyLossHit = dailyPnlSched <= -dailyLossLimitSched;
+
+      if (isMarketDay && !isDailyLossHit &&
           ((schedTime >= AUTO_START_1 && schedTime < AUTO_START_1 + 1) ||
            (!isExpiryDay && schedTime >= AUTO_START_2 && schedTime < AUTO_START_2 + 1))) {
         if (!existingSession) {
