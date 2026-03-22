@@ -820,14 +820,23 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
       const newRound = activeSession.current_round + 1;
       const newTotalPnl = activeSession.total_pnl + pnlAmount;
 
-      if (newRound > activeSession.max_rounds) {
+      // Check daily loss limit before proceeding to next round
+      const dailyPnlOnLoss = await getDailyPnl(supabase) + newTotalPnl; // include current session's updated pnl
+      const dailyLossLimitOnLoss = await getDailyLossLimit(supabase);
+
+      if (newRound > activeSession.max_rounds || dailyPnlOnLoss <= -dailyLossLimitOnLoss) {
+        const reason = newRound > activeSession.max_rounds
+          ? `MAX ROUNDS (${activeSession.max_rounds}) reached`
+          : `Daily loss limit reached (₹${Math.abs(dailyPnlOnLoss).toFixed(0)} / ₹${dailyLossLimitOnLoss})`;
+
         await supabase.from('martingale_sessions').update({
-          status: 'max_rounds_reached', total_pnl: newTotalPnl,
+          status: newRound > activeSession.max_rounds ? 'max_rounds_reached' : 'daily_loss_limit',
+          total_pnl: newTotalPnl,
           completed_at: new Date().toISOString(), current_round: newRound - 1,
         }).eq('id', activeSession.id);
 
         const modeLabel = isActual ? '🔴' : '📝';
-        actionTaken = `${modeLabel} ⛔ MAX ROUNDS (${activeSession.max_rounds}) reached. Session P&L: ₹${newTotalPnl.toFixed(0)}. Bot stopped — manual restart required.`;
+        actionTaken = `${modeLabel} ⛔ ${reason}. Session P&L: ₹${newTotalPnl.toFixed(0)}. Bot stopped — manual restart required.`;
         await sendTelegram(`📊 *Martingale Bot*\n\n${actionTaken}`);
       } else {
         const newOptionType = openTrade.option_type === 'CE' ? 'PE' : 'CE';
