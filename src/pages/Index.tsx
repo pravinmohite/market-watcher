@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
-import { Activity, Bell, RefreshCw, Send, TrendingUp, Zap, Bot } from "lucide-react";
+import { Activity, Bell, Brain, RefreshCw, Send, TrendingUp, Zap, Bot } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 import StockCard from "@/components/StockCard";
@@ -75,10 +75,16 @@ const Index = () => {
             </div>
           </div>
           <div className="flex items-center gap-2">
+            <Link to="/stock-analysis">
+              <Button variant="outline" className="gap-2">
+                <Brain className="w-4 h-4" />
+                <span className="hidden sm:inline">AI Picks</span>
+              </Button>
+            </Link>
             <Link to="/martingale">
               <Button variant="outline" className="gap-2">
                 <Bot className="w-4 h-4" />
-                Martingale Bot
+                <span className="hidden sm:inline">Martingale Bot</span>
               </Button>
             </Link>
             <Button
