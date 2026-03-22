@@ -11,6 +11,7 @@ import { Link, useSearchParams, useNavigate } from "react-router-dom";
 
 const Martingale = () => {
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const [roundFilter, setRoundFilter] = useState<string>("all");
   
