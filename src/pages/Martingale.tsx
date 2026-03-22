@@ -735,15 +735,15 @@ const DateWisePnL = ({ sessions, allTrades, sessionModeMap }: { sessions: any[];
 
   return (
     <section>
-      <h2 className="text-base font-semibold text-foreground mb-3 flex items-center gap-2">
+      <h2 className="text-sm md:text-base font-semibold text-foreground mb-3 flex items-center gap-2">
         <Calendar className="w-4 h-4 text-primary" />
         Date-wise P&L
       </h2>
       {/* Summary */}
-      <div className={cn("grid gap-3 mb-3", hasActualTrades ? "grid-cols-2 md:grid-cols-5" : "grid-cols-3")}>
-        <div className="rounded-xl border border-border bg-card p-3 text-center">
-          <p className="text-xs text-muted-foreground">Total P&L</p>
-          <p className={cn("text-lg font-bold font-mono", totalPnl >= 0 ? "text-gain" : "text-loss")}>
+      <div className={cn("grid gap-2 md:gap-3 mb-3", hasActualTrades ? "grid-cols-2 md:grid-cols-5" : "grid-cols-3")}>
+        <div className="rounded-xl border border-border bg-card p-2 md:p-3 text-center">
+          <p className="text-[10px] md:text-xs text-muted-foreground">Total P&L</p>
+          <p className={cn("text-base md:text-lg font-bold font-mono", totalPnl >= 0 ? "text-gain" : "text-loss")}>
             ₹{totalPnl.toFixed(0)}
           </p>
         </div>
