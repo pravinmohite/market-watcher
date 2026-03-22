@@ -749,27 +749,27 @@ const DateWisePnL = ({ sessions, allTrades, sessionModeMap }: { sessions: any[];
         </div>
         {hasActualTrades && (
           <>
-            <div className="rounded-xl border border-loss/30 bg-card p-3 text-center">
-              <p className="text-xs text-muted-foreground">🔴 Actual P&L</p>
-              <p className={cn("text-lg font-bold font-mono", totalActualPnl >= 0 ? "text-gain" : "text-loss")}>
+            <div className="rounded-xl border border-loss/30 bg-card p-2 md:p-3 text-center">
+              <p className="text-[10px] md:text-xs text-muted-foreground">🔴 Actual</p>
+              <p className={cn("text-base md:text-lg font-bold font-mono", totalActualPnl >= 0 ? "text-gain" : "text-loss")}>
                 ₹{totalActualPnl.toFixed(0)}
               </p>
             </div>
-            <div className="rounded-xl border border-border bg-card p-3 text-center">
-              <p className="text-xs text-muted-foreground">📝 Paper P&L</p>
-              <p className={cn("text-lg font-bold font-mono", totalPaperPnl >= 0 ? "text-gain" : "text-loss")}>
+            <div className="rounded-xl border border-border bg-card p-2 md:p-3 text-center">
+              <p className="text-[10px] md:text-xs text-muted-foreground">📝 Paper</p>
+              <p className={cn("text-base md:text-lg font-bold font-mono", totalPaperPnl >= 0 ? "text-gain" : "text-loss")}>
                 ₹{totalPaperPnl.toFixed(0)}
               </p>
             </div>
           </>
         )}
-        <div className="rounded-xl border border-border bg-card p-3 text-center">
-          <p className="text-xs text-muted-foreground">Win Days</p>
-          <p className="text-lg font-bold font-mono text-gain">{winDays}</p>
+        <div className="rounded-xl border border-border bg-card p-2 md:p-3 text-center">
+          <p className="text-[10px] md:text-xs text-muted-foreground">Win</p>
+          <p className="text-base md:text-lg font-bold font-mono text-gain">{winDays}</p>
         </div>
-        <div className="rounded-xl border border-border bg-card p-3 text-center">
-          <p className="text-xs text-muted-foreground">Loss Days</p>
-          <p className="text-lg font-bold font-mono text-loss">{lossDays}</p>
+        <div className="rounded-xl border border-border bg-card p-2 md:p-3 text-center">
+          <p className="text-[10px] md:text-xs text-muted-foreground">Loss</p>
+          <p className="text-base md:text-lg font-bold font-mono text-loss">{lossDays}</p>
         </div>
       </div>
       {/* Daily breakdown */}
