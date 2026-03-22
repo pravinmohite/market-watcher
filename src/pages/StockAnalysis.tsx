@@ -44,8 +44,14 @@ const StockAnalysis = () => {
   const { data: analysisData, refetch: runAnalysis, isLoading } = useQuery({
     queryKey: ["stock-analysis"],
     queryFn: async () => {
-      const stocks = stockData?.all_stocks || [];
-      if (stocks.length === 0) throw new Error("No stock data available");
+      // Fetch stock data fresh to avoid stale/missing data issues
+      let stocks = stockData?.all_stocks;
+      if (!stocks || stocks.length === 0) {
+        const { data: freshData, error: freshError } = await supabase.functions.invoke("check-stock-alerts");
+        if (freshError) throw freshError;
+        stocks = freshData?.all_stocks;
+      }
+      if (!stocks || stocks.length === 0) throw new Error("No stock data available");
       const { data, error } = await supabase.functions.invoke("analyze-stocks", {
         body: { stocks },
       });
@@ -57,10 +63,6 @@ const StockAnalysis = () => {
   });
 
   const handleAnalyze = async () => {
-    if (!stockData?.all_stocks?.length) {
-      toast.error("Stock data not loaded yet. Wait a moment and try again.");
-      return;
-    }
     setIsAnalyzing(true);
     try {
       await runAnalysis();
