@@ -155,6 +155,125 @@ async function placeUpstoxOrder(accessToken: string, params: {
   }
 }
 
+async function checkUpstoxOrderStatus(accessToken: string, orderId: string): Promise<{ status: string; filled: boolean; averagePrice?: number }> {
+  try {
+    const res = await fetch(`https://api-hft.upstox.com/v2/order/details?order_id=${orderId}`, {
+      method: 'GET',
+      headers: {
+        'Accept': 'application/json',
+        'Authorization': `Bearer ${accessToken}`,
+      },
+    });
+    const data = await res.json();
+    if (data.status === 'success' && data.data) {
+      const orderStatus = data.data.status?.toLowerCase() || '';
+      const filled = orderStatus === 'complete' || orderStatus === 'traded';
+      return { status: orderStatus, filled, averagePrice: data.data.average_price };
+    }
+    console.error(`Order status check failed: ${JSON.stringify(data)}`);
+    return { status: 'unknown', filled: false };
+  } catch (error) {
+    console.error('Order status check error:', error);
+    return { status: 'error', filled: false };
+  }
+}
+
+async function cancelUpstoxOrder(accessToken: string, orderId: string): Promise<boolean> {
+  try {
+    const res = await fetch(`https://api-hft.upstox.com/v2/order/cancel?order_id=${orderId}`, {
+      method: 'DELETE',
+      headers: {
+        'Accept': 'application/json',
+        'Authorization': `Bearer ${accessToken}`,
+      },
+    });
+    const data = await res.json();
+    console.log(`Cancel order ${orderId}: ${JSON.stringify(data)}`);
+    return data.status === 'success';
+  } catch (error) {
+    console.error('Cancel order error:', error);
+    return false;
+  }
+}
+
+// Place BUY order with retry logic: try up to 3 times, check fill status, cancel if pending
+async function placeBuyWithRetry(
+  supabase: any,
+  accessToken: string,
+  params: { instrumentKey: string; quantity: number; price: number },
+): Promise<{ success: boolean; filledPrice: number; error?: string }> {
+  for (let attempt = 1; attempt <= ORDER_FILL_MAX_RETRIES; attempt++) {
+    console.log(`BUY attempt ${attempt}/${ORDER_FILL_MAX_RETRIES} @ ₹${params.price}`);
+
+    const buyResult = await placeUpstoxOrder(accessToken, {
+      instrumentKey: params.instrumentKey,
+      quantity: params.quantity,
+      transactionType: 'BUY',
+      price: params.price,
+    });
+
+    if (!buyResult.success || !buyResult.orderId) {
+      console.error(`BUY attempt ${attempt} failed: ${buyResult.error}`);
+      if (attempt === ORDER_FILL_MAX_RETRIES) {
+        return { success: false, filledPrice: 0, error: `All ${ORDER_FILL_MAX_RETRIES} order attempts failed: ${buyResult.error}` };
+      }
+      await new Promise(r => setTimeout(r, 2000));
+      continue;
+    }
+
+    // Poll for fill status
+    let filled = false;
+    let filledPrice = params.price;
+    for (let check = 0; check < ORDER_FILL_MAX_CHECKS; check++) {
+      await new Promise(r => setTimeout(r, ORDER_FILL_CHECK_INTERVAL_MS));
+      const status = await checkUpstoxOrderStatus(accessToken, buyResult.orderId);
+      console.log(`Order ${buyResult.orderId} check ${check + 1}: ${status.status}`);
+      if (status.filled) {
+        filled = true;
+        filledPrice = status.averagePrice || params.price;
+        break;
+      }
+      // If rejected/cancelled by exchange, break immediately
+      if (['rejected', 'cancelled', 'canceled'].includes(status.status)) {
+        console.log(`Order ${buyResult.orderId} was ${status.status}`);
+        break;
+      }
+    }
+
+    if (filled) {
+      console.log(`BUY filled on attempt ${attempt} @ ₹${filledPrice}`);
+      return { success: true, filledPrice };
+    }
+
+    // Not filled — cancel and retry
+    console.log(`Order not filled after ${ORDER_FILL_MAX_CHECKS} checks, cancelling...`);
+    await cancelUpstoxOrder(accessToken, buyResult.orderId);
+    await new Promise(r => setTimeout(r, 2000)); // small gap before retry
+  }
+
+  return { success: false, filledPrice: 0, error: `Order not filled after ${ORDER_FILL_MAX_RETRIES} attempts` };
+}
+
+async function pauseBotWithNotification(supabase: any, sessionId: string, reason: string) {
+  const pausedUntil = new Date(Date.now() + PAUSE_DURATION_MS).toISOString();
+  
+  await supabase.from('martingale_sessions').update({
+    status: 'paused',
+    last_tick_at: new Date().toISOString(),
+  }).eq('id', sessionId);
+
+  // Store pause info in bot_settings
+  await supabase.from('bot_settings').upsert({
+    key: 'pause_until',
+    value: pausedUntil,
+    updated_at: new Date().toISOString(),
+  }, { onConflict: 'key' });
+
+  const msg = `⏸️ *Bot Paused for 10 minutes*\n\n${reason}\n\nWill auto-resume at ${new Date(pausedUntil).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })} IST`;
+  await sendTelegram(msg);
+  console.log(`Bot paused until ${pausedUntil}: ${reason}`);
+}
+
 async function sendTelegram(text: string) {
   const botToken = Deno.env.get('TELEGRAM_BOT_TOKEN');
   const chatId = Deno.env.get('TELEGRAM_CHAT_ID');
