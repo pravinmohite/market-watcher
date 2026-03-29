@@ -11,6 +11,10 @@ const PROFIT_TARGET = 2.5;
 const LOSS_LIMIT = 2;
 const DEFAULT_MAX_ROUNDS = 5;
 const DEFAULT_DAILY_LOSS_LIMIT = 12000;
+const ORDER_FILL_MAX_RETRIES = 3;
+const ORDER_FILL_CHECK_INTERVAL_MS = 8000; // 8 seconds between fill checks
+const ORDER_FILL_MAX_CHECKS = 3; // check 3 times (24s total wait per attempt)
+const PAUSE_DURATION_MS = 10 * 60 * 1000; // 10 minutes
 
 async function getDailyPnl(supabase: any): Promise<number> {
   // Get today's date in IST
