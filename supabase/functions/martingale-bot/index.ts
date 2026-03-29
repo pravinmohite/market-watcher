@@ -526,7 +526,8 @@ serve(async (req) => {
         });
       }
 
-      // Place actual buy order if in actual mode
+      // Place actual buy order if in actual mode (with retry + fill verification)
+      let actualEntryPrice = entryPrice;
       if (tradingMode === 'actual') {
         const accessToken = await getUpstoxToken(supabase);
         if (!accessToken || !entryInstrumentKey) {
@@ -534,17 +535,26 @@ serve(async (req) => {
             headers: { ...corsHeaders, 'Content-Type': 'application/json' },
           });
         }
-        const buyResult = await placeUpstoxOrder(accessToken, {
+        const buyResult = await placeBuyWithRetry(supabase, accessToken, {
           instrumentKey: entryInstrumentKey,
           quantity: 1 * LOT_SIZE,
-          transactionType: 'BUY',
           price: entryPrice,
         });
         if (!buyResult.success) {
-          return new Response(JSON.stringify({ success: false, message: `Order failed: ${buyResult.error}` }), {
+          // All 3 attempts failed — create session in paused state
+          const { data: pausedSession } = await supabase
+            .from('martingale_sessions')
+            .insert({ status: 'paused', current_round: 1, max_rounds: maxRounds, trading_mode: tradingMode })
+            .select().single();
+          if (pausedSession) {
+            await pauseBotWithNotification(supabase, pausedSession.id, 
+              `BUY order for ${entryStrike} ${entryOptionType} @ ₹${entryPrice} failed to fill after 3 attempts.`);
+          }
+          return new Response(JSON.stringify({ success: false, message: `Order not filled after 3 attempts. Bot paused for 10 minutes. ${buyResult.error}` }), {
             headers: { ...corsHeaders, 'Content-Type': 'application/json' },
           });
         }
+        actualEntryPrice = buyResult.filledPrice;
       }
 
       const { data: session, error: sessErr } = await supabase
@@ -559,7 +569,7 @@ serve(async (req) => {
         .insert({
           session_id: session.id, round: 1, option_type: entryOptionType,
           strike_price: entryStrike, lots: 1,
-          entry_price: entryPrice, status: 'open', nifty_spot: optionData.niftySpot,
+          entry_price: actualEntryPrice, status: 'open', nifty_spot: optionData.niftySpot,
         });
       if (tradeErr) throw tradeErr;
 
@@ -882,19 +892,29 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
 
       if (newPrice <= 0) { console.log(`Cannot start new session: ${newDirection} price is 0`); return; }
 
+      let actualNewPrice = newPrice;
       if (isActual) {
         const accessToken = await getUpstoxToken(supabase);
         if (accessToken && newInstrKey) {
-          const buyResult = await placeUpstoxOrder(accessToken, {
+          const buyResult = await placeBuyWithRetry(supabase, accessToken, {
             instrumentKey: newInstrKey,
             quantity: 1 * LOT_SIZE,
-            transactionType: 'BUY',
             price: newPrice,
           });
           if (!buyResult.success) {
-            console.error(`New session buy order failed: ${buyResult.error}`);
+            // Pause bot — create session in paused state for auto-resume
+            const { data: pausedSession } = await supabase
+              .from('martingale_sessions')
+              .insert({ status: 'paused', current_round: 1, max_rounds: activeSession.max_rounds, trading_mode: tradingMode })
+              .select().single();
+            if (pausedSession) {
+              await pauseBotWithNotification(supabase, pausedSession.id,
+                `New session BUY for ${newStrike} ${newDirection} @ ₹${newPrice} failed after 3 attempts.`);
+            }
+            console.error(`New session buy failed after retries: ${buyResult.error}`);
             return;
           }
+          actualNewPrice = buyResult.filledPrice;
         } else {
           console.error('Cannot place buy order: missing token or instrument key');
           return;
@@ -909,9 +929,9 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
         await supabase.from('martingale_trades').insert({
           session_id: newSession.id, round: 1, option_type: newDirection,
           strike_price: newStrike, lots: 1,
-          entry_price: newPrice, status: 'open', nifty_spot: optionData.niftySpot,
+          entry_price: actualNewPrice, status: 'open', nifty_spot: optionData.niftySpot,
         });
-        console.log(`New session: ${newDirection} ${newStrike} @ ₹${newPrice} (lastPnl=${lastPnl.toFixed(0)})`);
+        console.log(`New session: ${newDirection} ${newStrike} @ ₹${actualNewPrice} (lastPnl=${lastPnl.toFixed(0)})`);
       }
     }
 
@@ -996,18 +1016,25 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
           return { success: false, message: `Cannot enter round ${newRound}: option price is ₹0` };
         }
 
+        let actualRoundPrice = newPrice;
         if (isActual) {
           const accessToken = await getUpstoxToken(supabase);
           if (accessToken && newInstrKey) {
-            const buyResult = await placeUpstoxOrder(accessToken, {
+            const buyResult = await placeBuyWithRetry(supabase, accessToken, {
               instrumentKey: newInstrKey,
               quantity: newLots * LOT_SIZE,
-              transactionType: 'BUY',
               price: newPrice,
             });
             if (!buyResult.success) {
-              return { success: false, message: `Round ${newRound} buy order failed: ${buyResult.error}` };
+              // Pause bot for 10 mins
+              await pauseBotWithNotification(supabase, activeSession.id,
+                `Round ${newRound} BUY for ${newLots} lots ${newStrike} ${newOptionType} @ ₹${newPrice} failed after 3 attempts.`);
+              await supabase.from('martingale_sessions').update({
+                current_round: newRound, total_pnl: newTotalPnl,
+              }).eq('id', activeSession.id);
+              return { success: false, message: `Round ${newRound} order not filled after 3 attempts. Bot paused for 10 minutes.` };
             }
+            actualRoundPrice = buyResult.filledPrice;
           }
         }
 
@@ -1017,7 +1044,7 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
 
         await supabase.from('martingale_trades').insert({
           session_id: activeSession.id, round: newRound, option_type: newOptionType,
-          strike_price: newStrike, lots: newLots, entry_price: newPrice,
+          strike_price: newStrike, lots: newLots, entry_price: actualRoundPrice,
           status: 'open', nifty_spot: optionData.niftySpot,
         });
 
