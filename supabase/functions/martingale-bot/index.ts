@@ -302,13 +302,27 @@ serve(async (req) => {
     const action = body.action || 'tick';
 
     if (action === 'status') {
-      const { data: activeSession } = await supabase
+      // Check for active or paused session
+      let activeSession = null;
+      const { data: activeData } = await supabase
         .from('martingale_sessions')
         .select('*')
         .eq('status', 'active')
         .order('created_at', { ascending: false })
         .limit(1)
         .maybeSingle();
+      activeSession = activeData;
+
+      if (!activeSession) {
+        const { data: pausedData } = await supabase
+          .from('martingale_sessions')
+          .select('*')
+          .eq('status', 'paused')
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        activeSession = pausedData;
+      }
 
       let activeTrade = null;
       if (activeSession) {
