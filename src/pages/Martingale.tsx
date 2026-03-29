@@ -169,6 +169,7 @@ const Martingale = () => {
   const recentSessions = data?.recent_sessions || [];
   const allTrades = data?.all_trades || [];
   const isActive = activeSession?.status === 'active';
+  const isPaused = activeSession?.status === 'paused';
   const isUpstoxConnected = upstoxStatus?.connected;
   const dataSource = optionData?.source;
   const dailyPnl = data?.daily_pnl ?? 0;
@@ -432,10 +433,10 @@ const Martingale = () => {
             <div className="flex items-center gap-2">
               <div className={cn(
                 "w-2.5 h-2.5 md:w-3 md:h-3 rounded-full shrink-0",
-                isActive ? "bg-gain animate-pulse" : "bg-muted-foreground"
+                isActive ? "bg-gain animate-pulse" : isPaused ? "bg-yellow-500 animate-pulse" : "bg-muted-foreground"
               )} />
               <span className="text-xs md:text-sm font-medium text-foreground">
-                {isActive ? "Bot Running" : "Bot Stopped"}
+                {isActive ? "Bot Running" : isPaused ? "Bot Paused (resuming in ~10 min)" : "Bot Stopped"}
               </span>
               {isActive && activeSession && (
                 <span className="text-[10px] md:text-xs text-muted-foreground">
