@@ -742,6 +742,57 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
       return { success: true, message: `Outside market hours (${tickHour}:${String(tickMinute).padStart(2, '0')} IST). Skipping tick.` };
     }
 
+    // Check for paused session — auto-resume after 10 minutes
+    const { data: pausedSession } = await supabase
+      .from('martingale_sessions')
+      .select('*')
+      .eq('status', 'paused')
+      .maybeSingle();
+
+    if (pausedSession) {
+      const { data: pauseData } = await supabase
+        .from('bot_settings')
+        .select('value')
+        .eq('key', 'pause_until')
+        .maybeSingle();
+
+      if (pauseData?.value) {
+        const pauseUntil = new Date(pauseData.value).getTime();
+        if (Date.now() < pauseUntil) {
+          const remainMins = Math.ceil((pauseUntil - Date.now()) / 60000);
+          return { success: true, message: `Bot paused. Resuming in ~${remainMins} min.` };
+        }
+      }
+
+      // Pause period over — resume by starting fresh
+      await supabase.from('martingale_sessions').update({
+        status: 'pause_expired', completed_at: new Date().toISOString(),
+      }).eq('id', pausedSession.id);
+
+      // Clear pause_until
+      await supabase.from('bot_settings').delete().eq('key', 'pause_until');
+
+      // Auto-start a new session using saved settings
+      const { data: settings } = await supabase.from('bot_settings').select('key, value');
+      let savedMode = pausedSession.trading_mode || 'paper';
+      let savedMaxRounds = pausedSession.max_rounds || DEFAULT_MAX_ROUNDS;
+      if (settings) {
+        for (const s of settings) {
+          if (s.key === 'trading_mode') savedMode = s.value;
+          if (s.key === 'max_rounds') savedMaxRounds = Math.min(Math.max(parseInt(s.value) || DEFAULT_MAX_ROUNDS, 1), 10);
+        }
+      }
+
+      const startRes = await fetch(`${supabaseUrl}/functions/v1/martingale-bot`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${anonKey}` },
+        body: JSON.stringify({ action: 'start', trading_mode: savedMode, max_rounds: savedMaxRounds }),
+      });
+      const startData = await startRes.json();
+      await sendTelegram(`▶️ *Bot Resumed after 10-min pause*\n${startData.message || 'Restarted'}`);
+      return { success: true, action: `▶️ Resumed after pause: ${startData.message || 'restarted'}` };
+    }
+
     const { data: activeSession } = await supabase
       .from('martingale_sessions')
       .select('*')
