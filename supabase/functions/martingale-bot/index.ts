@@ -357,21 +357,17 @@ serve(async (req) => {
         .order('created_at', { ascending: false })
         .limit(500);
 
+      // Fetch trades directly by date range (oldest session's created_at) instead of .in() which fails with many IDs
       let allTrades: any[] = [];
       if (recentSessions && recentSessions.length > 0) {
-        const sessionIds = recentSessions.map((s: any) => s.id);
-        const batchSize = 500;
-        for (let i = 0; i < sessionIds.length; i += batchSize) {
-          const batch = sessionIds.slice(i, i + batchSize);
-          const { data: trades } = await supabase
-            .from('martingale_trades')
-            .select('*')
-            .in('session_id', batch)
-            .order('entry_time', { ascending: false })
-            .limit(5000);
-          if (trades) allTrades = allTrades.concat(trades);
-        }
-        allTrades.sort((a: any, b: any) => new Date(b.entry_time).getTime() - new Date(a.entry_time).getTime());
+        const oldestSession = recentSessions[recentSessions.length - 1];
+        const { data: trades } = await supabase
+          .from('martingale_trades')
+          .select('*')
+          .gte('entry_time', oldestSession.created_at)
+          .order('entry_time', { ascending: false })
+          .limit(5000);
+        if (trades) allTrades = trades;
       }
 
       const dailyPnl = await getDailyPnl(supabase);
