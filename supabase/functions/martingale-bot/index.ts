@@ -624,22 +624,21 @@ serve(async (req) => {
         '1021', // Diwali Balipratipada
         '1105', // Guru Nanak Jayanti (Prakash Utsav)
         '1225', // Christmas
-        // 2026
+        // 2026 (Official NSE list — weekday holidays only)
         '0126', // Republic Day
-        '0217', // Mahashivratri
-        '0310', // Holi (Dhuleti)
-        '0320', // Id-Ul-Fitr (subject to moon)
+        '0303', // Holi
+        '0326', // Shri Ram Navami
         '0331', // Shri Mahavir Jayanti
         '0403', // Good Friday
         '0414', // Dr. Ambedkar Jayanti
         '0501', // Maharashtra Day
-        '0527', // Id-Ul-Adha (Bakri Id)
-        '0815', // Independence Day
-        '0817', // Ganesh Chaturthi
+        '0528', // Bakri Id
+        '0626', // Muharram
+        '0914', // Ganesh Chaturthi
         '1002', // Mahatma Gandhi Jayanti
-        '1009', // Diwali (Laxmi Puja)
-        '1026', // Guru Nanak Jayanti
-        '1225', // Christmas
+        '1020', // Dussehra
+        '1110', // Diwali Balipratipada
+        '1124', // Guru Nanak Jayanti
       ];
 
       const schedMMDD = String(nowIST_sched.getMonth() + 1).padStart(2, '0') + String(nowIST_sched.getDate()).padStart(2, '0');
