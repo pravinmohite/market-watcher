@@ -629,7 +629,7 @@ serve(async (req) => {
         '0217', // Mahashivratri
         '0310', // Holi (Dhuleti)
         '0320', // Id-Ul-Fitr (subject to moon)
-        '0402', // Shri Mahavir Jayanti / Ram Navami (verify if market open)
+        // '0402' removed — Mahavir Jayanti 2026 is not on April 2
         '0403', // Good Friday
         '0414', // Dr. Ambedkar Jayanti
         '0501', // Maharashtra Day
