@@ -639,6 +639,7 @@ serve(async (req) => {
         '1020', // Dussehra
         '1110', // Diwali Balipratipada
         '1124', // Guru Nanak Jayanti
+        '1225', // Christmas
       ];
 
       const schedMMDD = String(nowIST_sched.getMonth() + 1).padStart(2, '0') + String(nowIST_sched.getDate()).padStart(2, '0');
