@@ -12,16 +12,15 @@ const LOSS_LIMIT = 2;
 const DEFAULT_MAX_ROUNDS = 5;
 const DEFAULT_DAILY_LOSS_LIMIT = 12000;
 const ORDER_FILL_MAX_RETRIES = 3;
-const ORDER_FILL_CHECK_INTERVAL_MS = 8000; // 8 seconds between fill checks
-const ORDER_FILL_MAX_CHECKS = 3; // check 3 times (24s total wait per attempt)
-const PAUSE_DURATION_MS = 10 * 60 * 1000; // 10 minutes
+const ORDER_FILL_CHECK_INTERVAL_MS = 8000;
+const ORDER_FILL_MAX_CHECKS = 3;
+const PAUSE_DURATION_MS = 10 * 60 * 1000;
+const DECAY_PAUSE_DURATION_MS = 15 * 60 * 1000; // 15 minutes for decay pause
 
 async function getDailyPnl(supabase: any): Promise<number> {
-  // Get today's date in IST
   const nowIST = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
   const todayStart = new Date(nowIST);
   todayStart.setHours(0, 0, 0, 0);
-  // Convert back to UTC for DB query
   const todayUTC = new Date(todayStart.getTime() - (5.5 * 60 * 60 * 1000));
 
   const { data: todaySessions } = await supabase
@@ -114,11 +113,10 @@ async function placeUpstoxOrder(accessToken: string, params: {
   orderType?: 'LIMIT' | 'MARKET';
 }): Promise<{ success: boolean; orderId?: string; error?: string }> {
   try {
-    // Use MARKET for SELL orders (exits) to guarantee fill, LIMIT for BUY orders
     const effectiveOrderType = params.orderType || (params.transactionType === 'SELL' ? 'MARKET' : 'LIMIT');
     const orderBody = {
       quantity: params.quantity,
-      product: 'I', // Intraday
+      product: 'I',
       validity: 'DAY',
       price: effectiveOrderType === 'MARKET' ? 0 : params.price,
       instrument_token: params.instrumentKey,
@@ -196,7 +194,6 @@ async function cancelUpstoxOrder(accessToken: string, orderId: string): Promise<
   }
 }
 
-// Place BUY order with retry logic: try up to 3 times, check fill status, cancel if pending
 async function placeBuyWithRetry(
   supabase: any,
   accessToken: string,
@@ -221,7 +218,6 @@ async function placeBuyWithRetry(
       continue;
     }
 
-    // Poll for fill status
     let filled = false;
     let filledPrice = params.price;
     for (let check = 0; check < ORDER_FILL_MAX_CHECKS; check++) {
@@ -233,7 +229,6 @@ async function placeBuyWithRetry(
         filledPrice = status.averagePrice || params.price;
         break;
       }
-      // If rejected/cancelled by exchange, break immediately
       if (['rejected', 'cancelled', 'canceled'].includes(status.status)) {
         console.log(`Order ${buyResult.orderId} was ${status.status}`);
         break;
@@ -245,10 +240,9 @@ async function placeBuyWithRetry(
       return { success: true, filledPrice };
     }
 
-    // Not filled — cancel and retry
     console.log(`Order not filled after ${ORDER_FILL_MAX_CHECKS} checks, cancelling...`);
     await cancelUpstoxOrder(accessToken, buyResult.orderId);
-    await new Promise(r => setTimeout(r, 2000)); // small gap before retry
+    await new Promise(r => setTimeout(r, 2000));
   }
 
   return { success: false, filledPrice: 0, error: `Order not filled after ${ORDER_FILL_MAX_RETRIES} attempts` };
@@ -262,7 +256,6 @@ async function pauseBotWithNotification(supabase: any, sessionId: string, reason
     last_tick_at: new Date().toISOString(),
   }).eq('id', sessionId);
 
-  // Store pause info in bot_settings
   await supabase.from('bot_settings').upsert({
     key: 'pause_until',
     value: pausedUntil,
@@ -286,6 +279,118 @@ async function sendTelegram(text: string) {
   }
 }
 
+// ========== DOUBLE DECAY DETECTION ==========
+// Checks if both CE and PE premiums are declining. If so, pauses trading for 15 mins.
+// After 15 mins, rechecks. Repeats until at least one premium is rising.
+
+async function checkAndHandleDoubleDecay(supabase: any, supabaseUrl: string, anonKey: string): Promise<{ decayDetected: boolean; message: string }> {
+  const { optionData } = await fetchNiftyOptionChain(supabaseUrl, anonKey);
+  if (!optionData || !optionData.otmCEPrice || !optionData.otmPEPrice) {
+    return { decayDetected: false, message: 'Cannot check decay: no option data' };
+  }
+
+  const currentCE = optionData.otmCEPrice;
+  const currentPE = optionData.otmPEPrice;
+
+  // Get previous snapshot
+  const { data: settings } = await supabase
+    .from('bot_settings')
+    .select('key, value')
+    .in('key', ['decay_ce_price', 'decay_pe_price', 'decay_check_time']);
+
+  const settingsMap: Record<string, string> = {};
+  if (settings) {
+    for (const s of settings) settingsMap[s.key] = s.value;
+  }
+
+  const prevCE = settingsMap.decay_ce_price ? parseFloat(settingsMap.decay_ce_price) : null;
+  const prevPE = settingsMap.decay_pe_price ? parseFloat(settingsMap.decay_pe_price) : null;
+
+  // Always update the snapshot for next comparison
+  await Promise.all([
+    supabase.from('bot_settings').upsert({ key: 'decay_ce_price', value: String(currentCE), updated_at: new Date().toISOString() }, { onConflict: 'key' }),
+    supabase.from('bot_settings').upsert({ key: 'decay_pe_price', value: String(currentPE), updated_at: new Date().toISOString() }, { onConflict: 'key' }),
+    supabase.from('bot_settings').upsert({ key: 'decay_check_time', value: new Date().toISOString(), updated_at: new Date().toISOString() }, { onConflict: 'key' }),
+  ]);
+
+  // If no previous snapshot, this is the first check — store and allow trading
+  if (prevCE === null || prevPE === null) {
+    console.log(`Decay check: First snapshot stored. CE=₹${currentCE}, PE=₹${currentPE}`);
+    return { decayDetected: false, message: `Premium snapshot taken: CE ₹${currentCE}, PE ₹${currentPE}` };
+  }
+
+  const ceDecreasing = currentCE < prevCE;
+  const peDecreasing = currentPE < prevPE;
+
+  console.log(`Decay check: CE ₹${prevCE}→₹${currentCE} (${ceDecreasing ? '↓' : '↑'}), PE ₹${prevPE}→₹${currentPE} (${peDecreasing ? '↓' : '↑'})`);
+
+  if (ceDecreasing && peDecreasing) {
+    // Both declining — set decay pause
+    const decayPauseUntil = new Date(Date.now() + DECAY_PAUSE_DURATION_MS).toISOString();
+    await supabase.from('bot_settings').upsert({
+      key: 'decay_pause_until',
+      value: decayPauseUntil,
+      updated_at: new Date().toISOString(),
+    }, { onConflict: 'key' });
+
+    const msg = `⚠️ *Double Decay Detected*\n\nBoth CE (₹${prevCE}→₹${currentCE}) and PE (₹${prevPE}→₹${currentPE}) premiums declining.\nBot paused for 15 mins.\nWill recheck at ${new Date(decayPauseUntil).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })} IST`;
+    await sendTelegram(msg);
+    console.log(`Double decay detected! Pausing until ${decayPauseUntil}`);
+
+    return { decayDetected: true, message: `Double decay: CE ₹${prevCE}→₹${currentCE}, PE ₹${prevPE}→₹${currentPE}. Paused 15 min.` };
+  }
+
+  // At least one premium is rising — clear any decay pause and allow trading
+  await supabase.from('bot_settings').delete().eq('key', 'decay_pause_until');
+  const risingLabel = !ceDecreasing ? 'CE' : 'PE';
+  console.log(`Decay check passed: ${risingLabel} is rising. Trading allowed.`);
+  return { decayDetected: false, message: `${risingLabel} premium rising. Trading allowed.` };
+}
+
+// Check if currently in a decay pause period
+async function isInDecayPause(supabase: any): Promise<{ paused: boolean; remainingMins: number; pauseUntil: string | null }> {
+  const { data } = await supabase
+    .from('bot_settings')
+    .select('value')
+    .eq('key', 'decay_pause_until')
+    .maybeSingle();
+
+  if (!data?.value) return { paused: false, remainingMins: 0, pauseUntil: null };
+
+  const pauseUntil = new Date(data.value).getTime();
+  if (Date.now() < pauseUntil) {
+    const remainingMins = Math.ceil((pauseUntil - Date.now()) / 60000);
+    return { paused: true, remainingMins, pauseUntil: data.value };
+  }
+
+  return { paused: false, remainingMins: 0, pauseUntil: data.value };
+}
+
+// Get decay status for UI display
+async function getDecayStatus(supabase: any): Promise<{ active: boolean; ce_prev?: number; ce_current?: number; pe_prev?: number; pe_current?: number; pause_until?: string; remaining_mins?: number }> {
+  const { data: settings } = await supabase
+    .from('bot_settings')
+    .select('key, value')
+    .in('key', ['decay_ce_price', 'decay_pe_price', 'decay_pause_until', 'decay_check_time']);
+
+  if (!settings || settings.length === 0) return { active: false };
+
+  const map: Record<string, string> = {};
+  for (const s of settings) map[s.key] = s.value;
+
+  const pauseUntil = map.decay_pause_until ? new Date(map.decay_pause_until).getTime() : null;
+  const isActive = pauseUntil ? Date.now() < pauseUntil : false;
+
+  return {
+    active: isActive,
+    ce_current: map.decay_ce_price ? parseFloat(map.decay_ce_price) : undefined,
+    pe_current: map.decay_pe_price ? parseFloat(map.decay_pe_price) : undefined,
+    pause_until: map.decay_pause_until || undefined,
+    remaining_mins: isActive ? Math.ceil((pauseUntil! - Date.now()) / 60000) : undefined,
+  };
+}
+// ========== END DOUBLE DECAY DETECTION ==========
+
 serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
@@ -302,7 +407,6 @@ serve(async (req) => {
     const action = body.action || 'tick';
 
     if (action === 'status') {
-      // Check for active or paused session
       let activeSession = null;
       const { data: activeData } = await supabase
         .from('martingale_sessions')
@@ -357,7 +461,6 @@ serve(async (req) => {
         .order('created_at', { ascending: false })
         .limit(500);
 
-      // Fetch trades directly by date range (oldest session's created_at) instead of .in() which fails with many IDs
       let allTrades: any[] = [];
       if (recentSessions && recentSessions.length > 0) {
         const oldestSession = recentSessions[recentSessions.length - 1];
@@ -372,6 +475,7 @@ serve(async (req) => {
 
       const dailyPnl = await getDailyPnl(supabase);
       const dailyLossLimit = await getDailyLossLimit(supabase);
+      const decayStatus = await getDecayStatus(supabase);
 
       return new Response(JSON.stringify({
         success: true,
@@ -384,6 +488,7 @@ serve(async (req) => {
         all_trades: allTrades,
         daily_pnl: dailyPnl,
         daily_loss_limit: dailyLossLimit,
+        decay_status: decayStatus,
       }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
     }
 
@@ -408,7 +513,6 @@ serve(async (req) => {
           if (result.specificPrice !== null) exitPrice = result.specificPrice;
           const pnl = (exitPrice - openTrade.entry_price) * openTrade.lots * LOT_SIZE;
 
-          // Place sell order if actual trading
           if (activeSession.trading_mode === 'actual') {
             const accessToken = await getUpstoxToken(supabase);
             if (accessToken && result.specificInstrumentKey) {
@@ -438,6 +542,14 @@ serve(async (req) => {
         }
       }
 
+      // Clear decay state on manual stop
+      await Promise.all([
+        supabase.from('bot_settings').delete().eq('key', 'decay_pause_until'),
+        supabase.from('bot_settings').delete().eq('key', 'decay_ce_price'),
+        supabase.from('bot_settings').delete().eq('key', 'decay_pe_price'),
+        supabase.from('bot_settings').delete().eq('key', 'decay_check_time'),
+      ]);
+
       return new Response(JSON.stringify({ success: true, message: 'Bot stopped' }), {
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       });
@@ -446,9 +558,8 @@ serve(async (req) => {
     if (action === 'start') {
       const tradingMode = body.trading_mode || 'paper';
       const maxRounds = Math.min(Math.max(parseInt(body.max_rounds) || DEFAULT_MAX_ROUNDS, 1), 10);
+      const skipDecayCheck = body.skip_decay_check === true; // Allow manual override
 
-
-      // Market hours guard
       const nowIST_start = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
       const startHour = nowIST_start.getHours();
       const startMinute = nowIST_start.getMinutes();
@@ -474,7 +585,31 @@ serve(async (req) => {
         });
       }
 
-      // Validate Upstox connection for actual trading
+      // Double decay check before starting (unless skipped by manual override)
+      if (!skipDecayCheck) {
+        // Check if currently in a decay pause
+        const decayPause = await isInDecayPause(supabase);
+        if (decayPause.paused) {
+          return new Response(JSON.stringify({ 
+            success: false, 
+            message: `⚠️ Double decay detected — both CE & PE premiums declining. Waiting ${decayPause.remainingMins} min before retrying.`,
+            decay_paused: true,
+          }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
+
+        // If decay pause just expired, recheck premiums
+        if (decayPause.pauseUntil) {
+          const decayResult = await checkAndHandleDoubleDecay(supabase, supabaseUrl, anonKey);
+          if (decayResult.decayDetected) {
+            return new Response(JSON.stringify({ 
+              success: false, 
+              message: `⚠️ ${decayResult.message}`,
+              decay_paused: true,
+            }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+          }
+        }
+      }
+
       if (tradingMode === 'actual') {
         const accessToken = await getUpstoxToken(supabase);
         if (!accessToken) {
@@ -491,7 +626,6 @@ serve(async (req) => {
         });
       }
 
-      // Determine entry direction
       let entryOptionType = 'CE';
 
       const { data: lastSession } = await supabase
@@ -536,7 +670,6 @@ serve(async (req) => {
         });
       }
 
-      // Place actual buy order if in actual mode (with retry + fill verification)
       let actualEntryPrice = entryPrice;
       if (tradingMode === 'actual') {
         const accessToken = await getUpstoxToken(supabase);
@@ -551,7 +684,6 @@ serve(async (req) => {
           price: entryPrice,
         });
         if (!buyResult.success) {
-          // All 3 attempts failed — create session in paused state
           const { data: pausedSession } = await supabase
             .from('martingale_sessions')
             .insert({ status: 'paused', current_round: 1, max_rounds: maxRounds, trading_mode: tradingMode })
@@ -566,6 +698,13 @@ serve(async (req) => {
         }
         actualEntryPrice = buyResult.filledPrice;
       }
+
+      // Store initial premium snapshot for decay detection
+      await Promise.all([
+        supabase.from('bot_settings').upsert({ key: 'decay_ce_price', value: String(optionData.otmCEPrice), updated_at: new Date().toISOString() }, { onConflict: 'key' }),
+        supabase.from('bot_settings').upsert({ key: 'decay_pe_price', value: String(optionData.otmPEPrice), updated_at: new Date().toISOString() }, { onConflict: 'key' }),
+        supabase.from('bot_settings').upsert({ key: 'decay_check_time', value: new Date().toISOString(), updated_at: new Date().toISOString() }, { onConflict: 'key' }),
+      ]);
 
       const { data: session, error: sessErr } = await supabase
         .from('martingale_sessions')
@@ -592,7 +731,6 @@ serve(async (req) => {
     }
 
     // action === 'tick' or 'cron-tick'
-    // For 'cron-tick', run 4 ticks with 15s intervals inside one invocation
     const isCronTick = action === 'cron-tick';
     const source = body.source || (isCronTick ? 'cron' : 'ui');
     const tickCount = isCronTick ? 4 : 1;
@@ -604,52 +742,20 @@ serve(async (req) => {
       const schedHour = nowIST_sched.getHours();
       const schedMinute = nowIST_sched.getMinutes();
       const schedTime = schedHour * 60 + schedMinute;
-      const schedDay = nowIST_sched.getDay(); // 0=Sun, 6=Sat
+      const schedDay = nowIST_sched.getDay();
 
-      // NSE holidays 2025-2026 (MMDD format for easy matching)
       const NSE_HOLIDAYS: string[] = [
-        // 2025
-        '0226', // Mahashivratri
-        '0314', // Holi
-        '0331', // Id-Ul-Fitr
-        '0410', // Shri Mahavir Jayanti
-        '0414', // Dr. Ambedkar Jayanti
-        '0418', // Good Friday
-        '0501', // Maharashtra Day
-        '0812', // Independence Day (observed)
-        '0815', // Independence Day
-        '0827', // Ganesh Chaturthi
-        '1002', // Mahatma Gandhi Jayanti
-        '1020', // Diwali (Laxmi Puja)
-        '1021', // Diwali Balipratipada
-        '1105', // Guru Nanak Jayanti (Prakash Utsav)
-        '1225', // Christmas
-        // 2026 (Official NSE list — weekday holidays only)
-        '0126', // Republic Day
-        '0303', // Holi
-        '0326', // Shri Ram Navami
-        '0331', // Shri Mahavir Jayanti
-        '0403', // Good Friday
-        '0414', // Dr. Ambedkar Jayanti
-        '0501', // Maharashtra Day
-        '0528', // Bakri Id
-        '0626', // Muharram
-        '0914', // Ganesh Chaturthi
-        '1002', // Mahatma Gandhi Jayanti
-        '1020', // Dussehra
-        '1110', // Diwali Balipratipada
-        '1124', // Guru Nanak Jayanti
-        '1225', // Christmas
+        '0226', '0314', '0331', '0410', '0414', '0418', '0501', '0812', '0815', '0827', '1002', '1020', '1021', '1105', '1225',
+        '0126', '0303', '0326', '0331', '0403', '0414', '0501', '0528', '0626', '0914', '1002', '1020', '1110', '1124', '1225',
       ];
 
       const schedMMDD = String(nowIST_sched.getMonth() + 1).padStart(2, '0') + String(nowIST_sched.getDate()).padStart(2, '0');
       const isMarketDay = schedDay !== 0 && schedDay !== 6 && !NSE_HOLIDAYS.includes(schedMMDD);
-      const isExpiryDay = schedDay === 2; // Nifty weekly expiry is Tuesday (since Sept 2025)
+      const isExpiryDay = schedDay === 2;
 
-      const AUTO_START_1 = 9 * 60 + 25;   // 9:25 AM
-      const AUTO_STOP_1  = 11 * 60 + 15;  // 11:15 AM
-      const AUTO_START_2 = 14 * 60 + 30;  // 2:30 PM
-      // 3:25 PM square-off is already handled inside runSingleTick
+      const AUTO_START_1 = 9 * 60 + 25;
+      const AUTO_STOP_1  = 11 * 60 + 15;
+      const AUTO_START_2 = 14 * 60 + 30;
 
       const { data: existingSession } = await supabase
         .from('martingale_sessions')
@@ -657,9 +763,6 @@ serve(async (req) => {
         .eq('status', 'active')
         .maybeSingle();
 
-      // Auto-start at 9:25 AM or 2:30 PM — only on market days
-      // Skip 2:30 PM session on expiry day (Tuesday) due to high theta decay
-      // Skip auto-start if daily loss limit was already hit today
       const dailyPnlSched = await getDailyPnl(supabase);
       const dailyLossLimitSched = await getDailyLossLimit(supabase);
       const isDailyLossHit = dailyPnlSched <= -dailyLossLimitSched;
@@ -668,31 +771,47 @@ serve(async (req) => {
           ((schedTime >= AUTO_START_1 && schedTime < AUTO_START_1 + 1) ||
            (!isExpiryDay && schedTime >= AUTO_START_2 && schedTime < AUTO_START_2 + 1))) {
         if (!existingSession) {
-          // Fetch saved settings from bot_settings
-          const { data: settings } = await supabase.from('bot_settings').select('key, value');
-          let savedMode = 'paper';
-          let savedMaxRounds = DEFAULT_MAX_ROUNDS;
-          if (settings) {
-            for (const s of settings) {
-              if (s.key === 'trading_mode') savedMode = s.value;
-              if (s.key === 'max_rounds') savedMaxRounds = Math.min(Math.max(parseInt(s.value) || DEFAULT_MAX_ROUNDS, 1), 10);
+          // Check for double decay before auto-starting
+          const decayPause = await isInDecayPause(supabase);
+          let shouldStart = true;
+
+          if (decayPause.paused) {
+            shouldStart = false;
+            tickResults.push(`⚠️ Double decay pause active. Skipping auto-start. ${decayPause.remainingMins} min remaining.`);
+          } else {
+            // Run decay check
+            const decayResult = await checkAndHandleDoubleDecay(supabase, supabaseUrl, anonKey);
+            if (decayResult.decayDetected) {
+              shouldStart = false;
+              tickResults.push(`⚠️ ${decayResult.message}`);
             }
           }
 
-          // Call start logic internally by making a self-request
-          const startRes = await fetch(`${supabaseUrl}/functions/v1/martingale-bot`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${anonKey}` },
-            body: JSON.stringify({ action: 'start', trading_mode: savedMode, max_rounds: savedMaxRounds }),
-          });
-          const startData = await startRes.json();
-          const timeLabel = schedTime >= AUTO_START_2 ? '2:30 PM' : '9:25 AM';
-          tickResults.push(`⏰ Auto-start (${timeLabel}): ${startData.message || 'started'}`);
-          await sendTelegram(`⏰ *Auto-Start (${timeLabel})*\n${startData.message || 'Bot started automatically'}`);
+          if (shouldStart) {
+            const { data: settings } = await supabase.from('bot_settings').select('key, value');
+            let savedMode = 'paper';
+            let savedMaxRounds = DEFAULT_MAX_ROUNDS;
+            if (settings) {
+              for (const s of settings) {
+                if (s.key === 'trading_mode') savedMode = s.value;
+                if (s.key === 'max_rounds') savedMaxRounds = Math.min(Math.max(parseInt(s.value) || DEFAULT_MAX_ROUNDS, 1), 10);
+              }
+            }
+
+            const startRes = await fetch(`${supabaseUrl}/functions/v1/martingale-bot`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${anonKey}` },
+              body: JSON.stringify({ action: 'start', trading_mode: savedMode, max_rounds: savedMaxRounds, skip_decay_check: true }),
+            });
+            const startData = await startRes.json();
+            const timeLabel = schedTime >= AUTO_START_2 ? '2:30 PM' : '9:25 AM';
+            tickResults.push(`⏰ Auto-start (${timeLabel}): ${startData.message || 'started'}`);
+            await sendTelegram(`⏰ *Auto-Start (${timeLabel})*\n${startData.message || 'Bot started automatically'}`);
+          }
         }
       }
 
-      // Auto square-off + stop at 11:15 AM (within a 1-minute window)
+      // Auto square-off + stop at 11:15 AM
       if (schedTime >= AUTO_STOP_1 && schedTime < AUTO_STOP_1 + 1) {
         if (existingSession) {
           const stopRes = await fetch(`${supabaseUrl}/functions/v1/martingale-bot`, {
@@ -703,7 +822,6 @@ serve(async (req) => {
           const stopData = await stopRes.json();
           tickResults.push(`⏰ Auto-stop (11:15 AM): ${stopData.message || 'stopped'}`);
           await sendTelegram(`⏰ *Auto-Stop (11:15 AM)*\nBot squared off and stopped automatically`);
-          // Skip ticks since we just stopped
           return new Response(JSON.stringify({
             success: true, ticks: tickResults.length, actions: tickResults,
             action: tickResults[tickResults.length - 1],
@@ -715,7 +833,6 @@ serve(async (req) => {
 
     for (let tickIdx = 0; tickIdx < tickCount; tickIdx++) {
       if (tickIdx > 0) {
-        // Sleep 15 seconds between ticks
         await new Promise(resolve => setTimeout(resolve, 15000));
       }
 
@@ -738,9 +855,8 @@ serve(async (req) => {
   }
 });
 
-// Single tick logic extracted into a function
+// Single tick logic
 async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string, source: string): Promise<any> {
-    // Market hours guard
     const nowIST_tick = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
     const tickHour = nowIST_tick.getHours();
     const tickMinute = nowIST_tick.getMinutes();
@@ -774,15 +890,13 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
         }
       }
 
-      // Pause period over — resume by starting fresh
+      // Pause period over — resume
       await supabase.from('martingale_sessions').update({
         status: 'pause_expired', completed_at: new Date().toISOString(),
       }).eq('id', pausedSession.id);
 
-      // Clear pause_until
       await supabase.from('bot_settings').delete().eq('key', 'pause_until');
 
-      // Auto-start a new session using saved settings
       const { data: settings } = await supabase.from('bot_settings').select('key, value');
       let savedMode = pausedSession.trading_mode || 'paper';
       let savedMaxRounds = pausedSession.max_rounds || DEFAULT_MAX_ROUNDS;
@@ -803,6 +917,50 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
       return { success: true, action: `▶️ Resumed after pause: ${startData.message || 'restarted'}` };
     }
 
+    // Check for decay pause — when no active session, periodically recheck decay
+    const { data: activeCheck } = await supabase
+      .from('martingale_sessions')
+      .select('id')
+      .eq('status', 'active')
+      .maybeSingle();
+
+    if (!activeCheck) {
+      const decayPause = await isInDecayPause(supabase);
+      if (decayPause.paused) {
+        return { success: true, message: `⚠️ Double decay pause: ${decayPause.remainingMins} min remaining. Both CE & PE premiums declining.` };
+      }
+      // If decay pause just expired, recheck
+      if (decayPause.pauseUntil) {
+        const decayResult = await checkAndHandleDoubleDecay(supabase, supabaseUrl, anonKey);
+        if (decayResult.decayDetected) {
+          return { success: true, message: `⚠️ ${decayResult.message}` };
+        }
+        // Decay cleared — try to auto-start
+        // Check if we're within trading windows
+        const isInWindow1 = tickTime >= (9 * 60 + 25) && tickTime < (11 * 60 + 15);
+        const isInWindow2 = tickTime >= (14 * 60 + 30) && tickTime < (15 * 60 + 25);
+        if (isInWindow1 || isInWindow2) {
+          const { data: settingsForStart } = await supabase.from('bot_settings').select('key, value');
+          let savedMode = 'paper';
+          let savedMaxRounds = DEFAULT_MAX_ROUNDS;
+          if (settingsForStart) {
+            for (const s of settingsForStart) {
+              if (s.key === 'trading_mode') savedMode = s.value;
+              if (s.key === 'max_rounds') savedMaxRounds = Math.min(Math.max(parseInt(s.value) || DEFAULT_MAX_ROUNDS, 1), 10);
+            }
+          }
+          const startRes = await fetch(`${supabaseUrl}/functions/v1/martingale-bot`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${anonKey}` },
+            body: JSON.stringify({ action: 'start', trading_mode: savedMode, max_rounds: savedMaxRounds, skip_decay_check: true }),
+          });
+          const startData = await startRes.json();
+          await sendTelegram(`✅ *Decay cleared — Bot Resumed*\n${decayResult.message}\n${startData.message || 'Started'}`);
+          return { success: true, action: `✅ Decay cleared. ${startData.message || 'Bot started'}` };
+        }
+      }
+    }
+
     const { data: activeSession } = await supabase
       .from('martingale_sessions')
       .select('*')
@@ -813,7 +971,7 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
       return { success: true, message: 'No active session' };
     }
 
-    // Deduplication: skip if last tick was less than 10 seconds ago (from a different source)
+    // Deduplication
     if (activeSession.last_tick_at) {
       const lastTickTime = new Date(activeSession.last_tick_at).getTime();
       const now = Date.now();
@@ -823,7 +981,6 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
       }
     }
 
-    // Update last_tick_at
     await supabase.from('martingale_sessions').update({
       last_tick_at: new Date().toISOString(),
     }).eq('id', activeSession.id);
@@ -884,10 +1041,9 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
       };
     }
 
-    // Check daily loss limit — square off and stop if breached
+    // Check daily loss limit
     const dailyPnlCheck = await getDailyPnl(supabase);
     const dailyLossLimitCheck = await getDailyLossLimit(supabase);
-    // Include current session's running P&L in the check
     const runningSessionPnl = activeSession.total_pnl;
     const { specificPrice: checkPrice, specificInstrumentKey: checkInstrKey } = await fetchNiftyOptionChain(
       supabaseUrl, anonKey, openTrade.strike_price, openTrade.option_type, openTrade.nifty_spot, openTrade.entry_price
@@ -901,7 +1057,6 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
     const effectiveDailyPnl = dailyPnlCheck + runningSessionPnl + checkPnlAmount;
 
     if (effectiveDailyPnl <= -dailyLossLimitCheck) {
-      // Square off the open trade
       if (isActual) {
         const accessToken = await getUpstoxToken(supabase);
         if (accessToken && checkInstrKey) {
@@ -936,6 +1091,12 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
     let actionTaken = `Monitoring: ${openTrade.option_type} ${openTrade.strike_price} @ ₹${currentPrice} (${pnlPercent.toFixed(2)}%)`;
 
     async function startNewSession(lastOptionType: string, lastPnl: number) {
+      // Before starting a new session, check for double decay
+      const decayResult = await checkAndHandleDoubleDecay(supabase, supabaseUrl, anonKey);
+      if (decayResult.decayDetected) {
+        console.log(`New session skipped: ${decayResult.message}`);
+        return;
+      }
 
       const { optionData } = await fetchNiftyOptionChain(supabaseUrl, anonKey);
       if (!optionData) { console.log('Cannot start new session: no option data'); return; }
@@ -963,7 +1124,6 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
             price: newPrice,
           });
           if (!buyResult.success) {
-            // Pause bot — create session in paused state for auto-resume
             const { data: pausedSession } = await supabase
               .from('martingale_sessions')
               .insert({ status: 'paused', current_round: 1, max_rounds: activeSession.max_rounds, trading_mode: tradingMode })
@@ -992,6 +1152,13 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
           strike_price: newStrike, lots: 1,
           entry_price: actualNewPrice, status: 'open', nifty_spot: optionData.niftySpot,
         });
+
+        // Update premium snapshot after successful entry
+        await Promise.all([
+          supabase.from('bot_settings').upsert({ key: 'decay_ce_price', value: String(optionData.otmCEPrice), updated_at: new Date().toISOString() }, { onConflict: 'key' }),
+          supabase.from('bot_settings').upsert({ key: 'decay_pe_price', value: String(optionData.otmPEPrice), updated_at: new Date().toISOString() }, { onConflict: 'key' }),
+        ]);
+
         console.log(`New session: ${newDirection} ${newStrike} @ ₹${actualNewPrice} (lastPnl=${lastPnl.toFixed(0)})`);
       }
     }
@@ -1050,7 +1217,6 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
       const newRound = activeSession.current_round + 1;
       const newTotalPnl = activeSession.total_pnl + pnlAmount;
 
-
       if (newRound > activeSession.max_rounds) {
         await supabase.from('martingale_sessions').update({
           status: 'max_rounds_reached', total_pnl: newTotalPnl,
@@ -1087,7 +1253,6 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
               price: newPrice,
             });
             if (!buyResult.success) {
-              // Pause bot for 10 mins
               await pauseBotWithNotification(supabase, activeSession.id,
                 `Round ${newRound} BUY for ${newLots} lots ${newStrike} ${newOptionType} @ ₹${newPrice} failed after 3 attempts.`);
               await supabase.from('martingale_sessions').update({
