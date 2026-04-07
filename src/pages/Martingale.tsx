@@ -457,6 +457,27 @@ const Martingale = () => {
           </div>
         </div>
 
+        {/* Double Decay Warning Banner */}
+        {decayStatus?.active && (
+          <div className="rounded-xl border border-warning/50 bg-warning/10 p-3 md:p-4">
+            <div className="flex items-center gap-2 md:gap-3">
+              <div className="w-8 h-8 md:w-10 md:h-10 rounded-lg bg-warning/20 flex items-center justify-center shrink-0">
+                <AlertTriangle className="w-4 h-4 md:w-5 md:h-5 text-warning" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <p className="text-xs md:text-sm font-semibold text-warning">⚠️ Double Decay Detected</p>
+                <p className="text-[10px] md:text-xs text-muted-foreground mt-0.5">
+                  Both CE (₹{decayStatus.ce_current?.toFixed(1)}) and PE (₹{decayStatus.pe_current?.toFixed(1)}) premiums are declining.
+                  Bot paused — rechecking in ~{decayStatus.remaining_mins} min.
+                </p>
+              </div>
+              <div className="shrink-0 px-2 py-1 rounded-full bg-warning/20 text-warning text-[10px] md:text-xs font-mono font-medium animate-pulse">
+                {decayStatus.remaining_mins}m
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Market Data */}
         {optionData && (
           <div className="grid grid-cols-3 md:grid-cols-5 gap-2 md:gap-3">
