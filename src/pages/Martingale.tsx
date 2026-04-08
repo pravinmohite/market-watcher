@@ -733,9 +733,11 @@ const Martingale = () => {
                       session.status === 'active' ? "bg-primary/15 text-primary" :
                       session.status === 'completed' ? "bg-gain/15 text-gain" :
                       session.status === 'squared_off' ? "bg-warning/15 text-warning" :
+                      session.status === 'decay_squared_off' ? "bg-warning/15 text-warning" :
                       "bg-muted text-muted-foreground"
                     )}>
-                      {session.status === 'squared_off' ? '3:25 exit' : session.status}
+                      {session.status === 'squared_off' ? '3:25 exit' : 
+                       session.status === 'decay_squared_off' ? '⚠️ decay exit' : session.status}
                     </span>
                     <span className="text-[10px] md:text-xs text-muted-foreground">
                       R{session.current_round}/{session.max_rounds}
