@@ -1090,6 +1090,77 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
     const pnlAmount = checkPnlAmount;
     let actionTaken = `Monitoring: ${openTrade.option_type} ${openTrade.strike_price} @ ₹${currentPrice} (${pnlPercent.toFixed(2)}%)`;
 
+    // ========== MID-SESSION DOUBLE DECAY CHECK ==========
+    // Continuously check if both CE & PE premiums are declining.
+    // If so, square off current trade immediately and pause for 15 mins.
+    {
+      const decayPause = await isInDecayPause(supabase);
+      if (!decayPause.paused) {
+        // Only check every tick (not during an existing pause)
+        const decayResult = await checkAndHandleDoubleDecay(supabase, supabaseUrl, anonKey);
+        if (decayResult.decayDetected) {
+          // Square off the current trade immediately
+          if (isActual) {
+            const accessToken = await getUpstoxToken(supabase);
+            if (accessToken && currentInstrKey) {
+              await placeUpstoxOrder(accessToken, {
+                instrumentKey: currentInstrKey,
+                quantity: openTrade.lots * LOT_SIZE,
+                transactionType: 'SELL',
+                price: currentPrice,
+              });
+            }
+          }
+
+          await supabase.from('martingale_trades').update({
+            status: 'closed', exit_price: currentPrice, pnl: pnlAmount, exit_time: new Date().toISOString(),
+          }).eq('id', openTrade.id);
+
+          const finalSessionPnl = activeSession.total_pnl + pnlAmount;
+          await supabase.from('martingale_sessions').update({
+            status: 'decay_squared_off', total_pnl: finalSessionPnl, completed_at: new Date().toISOString(),
+          }).eq('id', activeSession.id);
+
+          const modeLabel = isActual ? '🔴' : '📝';
+          const msg = `${modeLabel} ⚠️ *Double Decay — Mid-Session Square Off*\nR${openTrade.round} ${openTrade.option_type} ${openTrade.strike_price} @ ₹${currentPrice} (P&L: ₹${pnlAmount.toFixed(0)})\n${decayResult.message}\nBot paused for 15 mins.`;
+          await sendTelegram(msg);
+
+          return {
+            success: true,
+            action: `⚠️ Double Decay! Squared off R${openTrade.round} ${openTrade.option_type} @ ₹${currentPrice} (₹${pnlAmount.toFixed(0)}). Paused 15 min.`,
+          };
+        }
+      } else {
+        // We're in a decay pause but somehow have an active session — square off
+        if (isActual) {
+          const accessToken = await getUpstoxToken(supabase);
+          if (accessToken && currentInstrKey) {
+            await placeUpstoxOrder(accessToken, {
+              instrumentKey: currentInstrKey,
+              quantity: openTrade.lots * LOT_SIZE,
+              transactionType: 'SELL',
+              price: currentPrice,
+            });
+          }
+        }
+
+        await supabase.from('martingale_trades').update({
+          status: 'closed', exit_price: currentPrice, pnl: pnlAmount, exit_time: new Date().toISOString(),
+        }).eq('id', openTrade.id);
+
+        const finalSessionPnl = activeSession.total_pnl + pnlAmount;
+        await supabase.from('martingale_sessions').update({
+          status: 'decay_squared_off', total_pnl: finalSessionPnl, completed_at: new Date().toISOString(),
+        }).eq('id', activeSession.id);
+
+        return {
+          success: true,
+          action: `⚠️ Decay pause active — squared off R${openTrade.round} ${openTrade.option_type} @ ₹${currentPrice} (₹${pnlAmount.toFixed(0)}). ${decayPause.remainingMins} min remaining.`,
+        };
+      }
+    }
+    // ========== END MID-SESSION DOUBLE DECAY CHECK ==========
+
     async function startNewSession(lastOptionType: string, lastPnl: number) {
       // Before starting a new session, check for double decay
       const decayResult = await checkAndHandleDoubleDecay(supabase, supabaseUrl, anonKey);
