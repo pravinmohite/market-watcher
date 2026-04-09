@@ -405,8 +405,8 @@ async function getDecayStatus(supabase: any): Promise<any> {
     description: 'Between-round sideways detection (R3+ gate)',
   };
 }
-// ========== END BETWEEN-ROUND SIDEWAYS GATE ==========
 
+serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
   }
