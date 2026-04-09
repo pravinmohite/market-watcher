@@ -1059,10 +1059,10 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
     //  Sideways detection now happens between rounds at R3+ entry.)
 
     async function startNewSession(lastOptionType: string, lastPnl: number) {
-      // Before starting a new session, check for double decay
-      const decayResult = await checkAndHandleDoubleDecay(supabase, supabaseUrl, anonKey);
-      if (decayResult.decayDetected) {
-        console.log(`New session skipped: ${decayResult.message}`);
+      // Check sideways pause before starting new session
+      const sidewaysPause = await isInSidewaysPause(supabase);
+      if (sidewaysPause.paused) {
+        console.log(`New session skipped: sideways pause active (${sidewaysPause.remainingMins} min remaining)`);
         return;
       }
 
