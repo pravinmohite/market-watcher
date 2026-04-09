@@ -696,13 +696,6 @@ serve(async (req) => {
         actualEntryPrice = buyResult.filledPrice;
       }
 
-      // Store initial premium snapshot for decay detection
-      await Promise.all([
-        supabase.from('bot_settings').upsert({ key: 'decay_ce_price', value: String(optionData.otmCEPrice), updated_at: new Date().toISOString() }, { onConflict: 'key' }),
-        supabase.from('bot_settings').upsert({ key: 'decay_pe_price', value: String(optionData.otmPEPrice), updated_at: new Date().toISOString() }, { onConflict: 'key' }),
-        supabase.from('bot_settings').upsert({ key: 'decay_check_time', value: new Date().toISOString(), updated_at: new Date().toISOString() }, { onConflict: 'key' }),
-      ]);
-
       const { data: session, error: sessErr } = await supabase
         .from('martingale_sessions')
         .insert({ status: 'active', current_round: 1, max_rounds: maxRounds, trading_mode: tradingMode })
