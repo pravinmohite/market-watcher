@@ -279,9 +279,38 @@ async function sendTelegram(text: string) {
   }
 }
 
-// ========== DOUBLE DECAY DETECTION ==========
-// Checks if both CE and PE premiums are declining. If so, pauses trading for 15 mins.
-// After 15 mins, rechecks. Repeats until at least one premium is rising.
+// ========== DOUBLE DECAY DETECTION (Premium Trend Based) ==========
+// Tracks OTM CE and PE prices every tick in a rolling 5-minute buffer.
+// If both premiums show a net decline over the 5-minute window → double decay.
+// This catches scenarios where momentary oscillations fool snapshot comparisons.
+
+const DECAY_LOOKBACK_MS = 5 * 60 * 1000; // 5-minute lookback window
+
+interface PremiumSnapshot {
+  t: number; // timestamp ms
+  ce: number;
+  pe: number;
+}
+
+async function getPremiumHistory(supabase: any): Promise<PremiumSnapshot[]> {
+  const { data } = await supabase
+    .from('bot_settings')
+    .select('value')
+    .eq('key', 'decay_premium_history')
+    .maybeSingle();
+  if (data?.value) {
+    try { return JSON.parse(data.value); } catch { return []; }
+  }
+  return [];
+}
+
+async function savePremiumHistory(supabase: any, history: PremiumSnapshot[]): Promise<void> {
+  await supabase.from('bot_settings').upsert({
+    key: 'decay_premium_history',
+    value: JSON.stringify(history),
+    updated_at: new Date().toISOString(),
+  }, { onConflict: 'key' });
+}
 
 async function checkAndHandleDoubleDecay(supabase: any, supabaseUrl: string, anonKey: string): Promise<{ decayDetected: boolean; message: string }> {
   const { optionData } = await fetchNiftyOptionChain(supabaseUrl, anonKey);
@@ -289,43 +318,44 @@ async function checkAndHandleDoubleDecay(supabase: any, supabaseUrl: string, ano
     return { decayDetected: false, message: 'Cannot check decay: no option data' };
   }
 
+  const now = Date.now();
   const currentCE = optionData.otmCEPrice;
   const currentPE = optionData.otmPEPrice;
 
-  // Get previous snapshot
-  const { data: settings } = await supabase
-    .from('bot_settings')
-    .select('key, value')
-    .in('key', ['decay_ce_price', 'decay_pe_price', 'decay_check_time']);
+  // Load history, append current, trim to 5-minute window
+  let history = await getPremiumHistory(supabase);
+  history.push({ t: now, ce: currentCE, pe: currentPE });
+  history = history.filter(s => now - s.t <= DECAY_LOOKBACK_MS);
+  await savePremiumHistory(supabase, history);
 
-  const settingsMap: Record<string, string> = {};
-  if (settings) {
-    for (const s of settings) settingsMap[s.key] = s.value;
-  }
-
-  const prevCE = settingsMap.decay_ce_price ? parseFloat(settingsMap.decay_ce_price) : null;
-  const prevPE = settingsMap.decay_pe_price ? parseFloat(settingsMap.decay_pe_price) : null;
-
-  // Always update the snapshot for next comparison
+  // Also update the latest snapshot keys for UI display
   await Promise.all([
     supabase.from('bot_settings').upsert({ key: 'decay_ce_price', value: String(currentCE), updated_at: new Date().toISOString() }, { onConflict: 'key' }),
     supabase.from('bot_settings').upsert({ key: 'decay_pe_price', value: String(currentPE), updated_at: new Date().toISOString() }, { onConflict: 'key' }),
-    supabase.from('bot_settings').upsert({ key: 'decay_check_time', value: new Date().toISOString(), updated_at: new Date().toISOString() }, { onConflict: 'key' }),
   ]);
 
-  // If no previous snapshot, this is the first check — store and allow trading
-  if (prevCE === null || prevPE === null) {
-    console.log(`Decay check: First snapshot stored. CE=₹${currentCE}, PE=₹${currentPE}`);
-    return { decayDetected: false, message: `Premium snapshot taken: CE ₹${currentCE}, PE ₹${currentPE}` };
+  // Need at least 2 minutes of data (enough ticks to confirm a trend, not just noise)
+  const oldestAllowed = now - DECAY_LOOKBACK_MS;
+  const oldEntries = history.filter(s => s.t <= now - 2 * 60 * 1000); // entries from 2+ mins ago
+  if (oldEntries.length === 0) {
+    console.log(`Decay check: Building history (${history.length} snapshots). CE=₹${currentCE}, PE=₹${currentPE}`);
+    return { decayDetected: false, message: `Building premium history (${history.length} snapshots)` };
   }
 
-  const ceDecreasing = currentCE < prevCE;
-  const peDecreasing = currentPE < prevPE;
+  // Compare: earliest entry in window vs latest entry
+  const earliest = history[0];
+  const latest = history[history.length - 1];
 
-  console.log(`Decay check: CE ₹${prevCE}→₹${currentCE} (${ceDecreasing ? '↓' : '↑'}), PE ₹${prevPE}→₹${currentPE} (${peDecreasing ? '↓' : '↑'})`);
+  const ceChange = latest.ce - earliest.ce;
+  const peChange = latest.pe - earliest.pe;
+  const ceDecreasing = ceChange < 0;
+  const peDecreasing = peChange < 0;
+
+  const windowSecs = Math.round((latest.t - earliest.t) / 1000);
+  console.log(`Decay trend (${windowSecs}s window, ${history.length} pts): CE ₹${earliest.ce.toFixed(1)}→₹${latest.ce.toFixed(1)} (${ceDecreasing ? '↓' : '↑'}${Math.abs(ceChange).toFixed(1)}), PE ₹${earliest.pe.toFixed(1)}→₹${latest.pe.toFixed(1)} (${peDecreasing ? '↓' : '↑'}${Math.abs(peChange).toFixed(1)})`);
 
   if (ceDecreasing && peDecreasing) {
-    // Both declining — set decay pause
+    // Both declining over the window — set decay pause
     const decayPauseUntil = new Date(Date.now() + DECAY_PAUSE_DURATION_MS).toISOString();
     await supabase.from('bot_settings').upsert({
       key: 'decay_pause_until',
@@ -333,18 +363,21 @@ async function checkAndHandleDoubleDecay(supabase: any, supabaseUrl: string, ano
       updated_at: new Date().toISOString(),
     }, { onConflict: 'key' });
 
-    const msg = `⚠️ *Double Decay Detected*\n\nBoth CE (₹${prevCE}→₹${currentCE}) and PE (₹${prevPE}→₹${currentPE}) premiums declining.\nBot paused for 15 mins.\nWill recheck at ${new Date(decayPauseUntil).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })} IST`;
-    await sendTelegram(msg);
-    console.log(`Double decay detected! Pausing until ${decayPauseUntil}`);
+    // Clear history so we start fresh after pause
+    await savePremiumHistory(supabase, []);
 
-    return { decayDetected: true, message: `Double decay: CE ₹${prevCE}→₹${currentCE}, PE ₹${prevPE}→₹${currentPE}. Paused 15 min.` };
+    const msg = `⚠️ *Double Decay Detected (5-min trend)*\n\nCE: ₹${earliest.ce.toFixed(1)}→₹${latest.ce.toFixed(1)} (${ceChange.toFixed(1)})\nPE: ₹${earliest.pe.toFixed(1)}→₹${latest.pe.toFixed(1)} (${peChange.toFixed(1)})\nWindow: ${windowSecs}s, ${history.length} data points\nBot paused 15 mins until ${new Date(decayPauseUntil).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })} IST`;
+    await sendTelegram(msg);
+    console.log(`Double decay detected (trend)! Pausing until ${decayPauseUntil}`);
+
+    return { decayDetected: true, message: `Double decay (5-min trend): CE ${ceChange.toFixed(1)}, PE ${peChange.toFixed(1)}. Paused 15 min.` };
   }
 
-  // At least one premium is rising — clear any decay pause and allow trading
+  // At least one premium trending up — clear any decay pause
   await supabase.from('bot_settings').delete().eq('key', 'decay_pause_until');
   const risingLabel = !ceDecreasing ? 'CE' : 'PE';
-  console.log(`Decay check passed: ${risingLabel} is rising. Trading allowed.`);
-  return { decayDetected: false, message: `${risingLabel} premium rising. Trading allowed.` };
+  console.log(`Decay trend OK: ${risingLabel} rising over ${windowSecs}s.`);
+  return { decayDetected: false, message: `${risingLabel} premium trending up. Trading allowed.` };
 }
 
 // Check if currently in a decay pause period
@@ -367,11 +400,11 @@ async function isInDecayPause(supabase: any): Promise<{ paused: boolean; remaini
 }
 
 // Get decay status for UI display
-async function getDecayStatus(supabase: any): Promise<{ active: boolean; ce_prev?: number; ce_current?: number; pe_prev?: number; pe_current?: number; pause_until?: string; remaining_mins?: number }> {
+async function getDecayStatus(supabase: any): Promise<{ active: boolean; ce_prev?: number; ce_current?: number; pe_prev?: number; pe_current?: number; pause_until?: string; remaining_mins?: number; history_count?: number }> {
   const { data: settings } = await supabase
     .from('bot_settings')
     .select('key, value')
-    .in('key', ['decay_ce_price', 'decay_pe_price', 'decay_pause_until', 'decay_check_time']);
+    .in('key', ['decay_ce_price', 'decay_pe_price', 'decay_pause_until', 'decay_premium_history']);
 
   if (!settings || settings.length === 0) return { active: false };
 
@@ -381,69 +414,31 @@ async function getDecayStatus(supabase: any): Promise<{ active: boolean; ce_prev
   const pauseUntil = map.decay_pause_until ? new Date(map.decay_pause_until).getTime() : null;
   const isActive = pauseUntil ? Date.now() < pauseUntil : false;
 
+  let historyCount = 0;
+  let ceTrend: number | undefined;
+  let peTrend: number | undefined;
+  if (map.decay_premium_history) {
+    try {
+      const history: PremiumSnapshot[] = JSON.parse(map.decay_premium_history);
+      historyCount = history.length;
+      if (history.length >= 2) {
+        ceTrend = history[history.length - 1].ce - history[0].ce;
+        peTrend = history[history.length - 1].pe - history[0].pe;
+      }
+    } catch {}
+  }
+
   return {
     active: isActive,
     ce_current: map.decay_ce_price ? parseFloat(map.decay_ce_price) : undefined,
     pe_current: map.decay_pe_price ? parseFloat(map.decay_pe_price) : undefined,
     pause_until: map.decay_pause_until || undefined,
     remaining_mins: isActive ? Math.ceil((pauseUntil! - Date.now()) / 60000) : undefined,
+    history_count: historyCount,
+    ce_trend: ceTrend,
+    pe_trend: peTrend,
   };
 }
-// ========== CONSECUTIVE LOSS DECAY DETECTION ==========
-// Detects double decay by checking if all recent trades in a session lost,
-// alternating between CE and PE. This catches the scenario where snapshot-based
-// detection fails because premiums oscillate momentarily but trend down overall.
-// Example: R1 CE lost, R2 PE lost → both directions losing = double decay.
-const CONSECUTIVE_LOSS_THRESHOLD = 2; // Trigger after 2 consecutive alternating losses
-
-async function checkConsecutiveLossDecay(
-  supabase: any, sessionId: string
-): Promise<{ decayDetected: boolean; message: string }> {
-  // Get all closed trades in the current session, ordered by round
-  const { data: closedTrades } = await supabase
-    .from('martingale_trades')
-    .select('round, option_type, pnl')
-    .eq('session_id', sessionId)
-    .eq('status', 'closed')
-    .order('round', { ascending: true });
-
-  if (!closedTrades || closedTrades.length < CONSECUTIVE_LOSS_THRESHOLD) {
-    return { decayDetected: false, message: 'Not enough trades to evaluate' };
-  }
-
-  // Check last N trades: all must be losses AND alternate CE/PE
-  const recentTrades = closedTrades.slice(-CONSECUTIVE_LOSS_THRESHOLD);
-  const allLosses = recentTrades.every((t: any) => (Number(t.pnl) || 0) < 0);
-  
-  if (!allLosses) {
-    return { decayDetected: false, message: 'Not all recent trades are losses' };
-  }
-
-  // Check if directions alternate (CE→PE or PE→CE)
-  let alternating = true;
-  for (let i = 1; i < recentTrades.length; i++) {
-    if (recentTrades[i].option_type === recentTrades[i - 1].option_type) {
-      alternating = false;
-      break;
-    }
-  }
-
-  if (!alternating) {
-    return { decayDetected: false, message: 'Losses are not in alternating directions' };
-  }
-
-  // Double decay confirmed: both CE and PE lost in consecutive alternating trades
-  const tradesSummary = recentTrades.map((t: any) =>
-    `R${t.round} ${t.option_type} ₹${Number(t.pnl).toFixed(0)}`
-  ).join(', ');
-
-  return {
-    decayDetected: true,
-    message: `Consecutive loss decay: ${tradesSummary}. Both CE & PE directions losing — theta trap detected.`,
-  };
-}
-// ========== END CONSECUTIVE LOSS DECAY DETECTION ==========
-
 // ========== END DOUBLE DECAY DETECTION ==========
 
 serve(async (req) => {
