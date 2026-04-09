@@ -1215,6 +1215,7 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
 
         const sidewaysCheck = await shouldSkipNextRound(
           supabase, activeSession.id, newRound, optionData.niftySpot, supabaseUrl, anonKey,
+          optionData.otmCEPrice, optionData.otmPEPrice,
         );
 
         if (sidewaysCheck.skip) {
