@@ -1121,11 +1121,8 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
           entry_price: actualNewPrice, status: 'open', nifty_spot: optionData.niftySpot,
         });
 
-        // Update premium snapshot after successful entry
-        await Promise.all([
-          supabase.from('bot_settings').upsert({ key: 'decay_ce_price', value: String(optionData.otmCEPrice), updated_at: new Date().toISOString() }, { onConflict: 'key' }),
-          supabase.from('bot_settings').upsert({ key: 'decay_pe_price', value: String(optionData.otmPEPrice), updated_at: new Date().toISOString() }, { onConflict: 'key' }),
-        ]);
+
+
 
         console.log(`New session: ${newDirection} ${newStrike} @ ₹${actualNewPrice} (lastPnl=${lastPnl.toFixed(0)})`);
       }
