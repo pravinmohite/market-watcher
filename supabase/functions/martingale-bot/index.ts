@@ -15,7 +15,9 @@ const ORDER_FILL_MAX_RETRIES = 3;
 const ORDER_FILL_CHECK_INTERVAL_MS = 8000;
 const ORDER_FILL_MAX_CHECKS = 3;
 const PAUSE_DURATION_MS = 10 * 60 * 1000;
-const DECAY_PAUSE_DURATION_MS = 15 * 60 * 1000; // 15 min pause on decay detection
+const SIDEWAYS_PAUSE_DURATION_MS = 15 * 60 * 1000; // 15 min pause after sideways skip
+const SIDEWAYS_MIN_ROUND = 3; // Only gate entry from R3 onwards
+const SIDEWAYS_NIFTY_RANGE_THRESHOLD = 50; // Nifty range < 50pts in last 15min = sideways
 
 async function getDailyPnl(supabase: any): Promise<number> {
   const nowIST = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
@@ -279,165 +281,130 @@ async function sendTelegram(text: string) {
   }
 }
 
-// ========== DOUBLE DECAY DETECTION (Premium Trend Based) ==========
-// Tracks OTM CE and PE prices every tick in a rolling 5-minute buffer.
-// If both premiums show a net decline over the 5-minute window → double decay.
-// This catches scenarios where momentary oscillations fool snapshot comparisons.
+// ========== BETWEEN-ROUND SIDEWAYS GATE ==========
+// Instead of detecting decay mid-trade (the -2% stop handles that),
+// this gates ENTRY into R3+ by checking:
+// 1) Were the last 2 rounds both losses?
+// 2) Is Nifty range-bound (< threshold pts in recent history)?
+// If both → skip entry, end session, reset to R1, pause 15 min.
 
-const DECAY_LOOKBACK_MS = 5 * 60 * 1000; // 5-minute lookback window
-
-interface PremiumSnapshot {
-  t: number; // timestamp ms
-  ce: number;
-  pe: number;
-}
-
-async function getPremiumHistory(supabase: any): Promise<PremiumSnapshot[]> {
-  const { data } = await supabase
-    .from('bot_settings')
-    .select('value')
-    .eq('key', 'decay_premium_history')
-    .maybeSingle();
-  if (data?.value) {
-    try { return JSON.parse(data.value); } catch { return []; }
-  }
-  return [];
-}
-
-async function savePremiumHistory(supabase: any, history: PremiumSnapshot[]): Promise<void> {
-  await supabase.from('bot_settings').upsert({
-    key: 'decay_premium_history',
-    value: JSON.stringify(history),
-    updated_at: new Date().toISOString(),
-  }, { onConflict: 'key' });
-}
-
-async function checkAndHandleDoubleDecay(supabase: any, supabaseUrl: string, anonKey: string): Promise<{ decayDetected: boolean; message: string }> {
-  const { optionData } = await fetchNiftyOptionChain(supabaseUrl, anonKey);
-  if (!optionData || !optionData.otmCEPrice || !optionData.otmPEPrice) {
-    return { decayDetected: false, message: 'Cannot check decay: no option data' };
+async function shouldSkipNextRound(
+  supabase: any, 
+  sessionId: string, 
+  nextRound: number,
+  niftySpot: number,
+  supabaseUrl: string,
+  anonKey: string,
+): Promise<{ skip: boolean; reason: string }> {
+  // R1 and R2 — always allow, early losses are normal
+  if (nextRound < SIDEWAYS_MIN_ROUND) {
+    return { skip: false, reason: `R${nextRound}: allowed (< R${SIDEWAYS_MIN_ROUND})` };
   }
 
-  const now = Date.now();
-  const currentCE = optionData.otmCEPrice;
-  const currentPE = optionData.otmPEPrice;
+  // Check if last 2 rounds in this session were both losses
+  const { data: recentTrades } = await supabase
+    .from('martingale_trades')
+    .select('round, pnl, status')
+    .eq('session_id', sessionId)
+    .eq('status', 'closed')
+    .order('round', { ascending: false })
+    .limit(2);
 
-  // Load history, append current, trim to 5-minute window
-  let history = await getPremiumHistory(supabase);
-  history.push({ t: now, ce: currentCE, pe: currentPE });
-  history = history.filter(s => now - s.t <= DECAY_LOOKBACK_MS);
-  await savePremiumHistory(supabase, history);
-
-  // Also update the latest snapshot keys for UI display
-  await Promise.all([
-    supabase.from('bot_settings').upsert({ key: 'decay_ce_price', value: String(currentCE), updated_at: new Date().toISOString() }, { onConflict: 'key' }),
-    supabase.from('bot_settings').upsert({ key: 'decay_pe_price', value: String(currentPE), updated_at: new Date().toISOString() }, { onConflict: 'key' }),
-  ]);
-
-  // Need at least 2 minutes of data
-  const oldEntries = history.filter(s => s.t <= now - 2 * 60 * 1000);
-  if (oldEntries.length === 0) {
-    console.log(`Decay check: Building history (${history.length} snapshots). CE=₹${currentCE}, PE=₹${currentPE}`);
-    return { decayDetected: false, message: `Building premium history (${history.length} snapshots)` };
+  if (!recentTrades || recentTrades.length < 2) {
+    return { skip: false, reason: 'Not enough trade history to evaluate' };
   }
 
-  const earliest = history[0];
-  const latest = history[history.length - 1];
-  const windowSecs = Math.round((latest.t - earliest.t) / 1000);
-  const ceChange = latest.ce - earliest.ce;
-  const peChange = latest.pe - earliest.pe;
-
-  console.log(`Decay trend (${windowSecs}s, ${history.length}pts): CE ₹${earliest.ce.toFixed(1)}→₹${latest.ce.toFixed(1)} (${ceChange >= 0 ? '+' : ''}${ceChange.toFixed(1)}), PE ₹${earliest.pe.toFixed(1)}→₹${latest.pe.toFixed(1)} (${peChange >= 0 ? '+' : ''}${peChange.toFixed(1)})`);
-
-  // Simple check: both CE and PE must show net decline over the window
-  if (ceChange >= 0 || peChange >= 0) {
-    const risingLabel = ceChange >= 0 ? 'CE' : 'PE';
-    return { decayDetected: false, message: `${risingLabel} stable/rising. No decay.` };
+  const lastTwoLosses = recentTrades.every((t: any) => (t.pnl || 0) < 0);
+  if (!lastTwoLosses) {
+    return { skip: false, reason: `R${nextRound}: last 2 rounds not both losses — proceed` };
   }
 
-  // Both declining → double decay confirmed
-  const decayPauseUntil = new Date(Date.now() + DECAY_PAUSE_DURATION_MS).toISOString();
+  // Both were losses — now check if market is sideways
+  // Use Nifty spot range from recent trades vs current spot
+  const tradeSpots = recentTrades
+    .map((t: any) => t.nifty_spot)
+    .filter((s: any) => s && s > 0);
+  
+  // Also get the oldest trade's nifty spot for a wider range check
+  const { data: allSessionTrades } = await supabase
+    .from('martingale_trades')
+    .select('nifty_spot, entry_time')
+    .eq('session_id', sessionId)
+    .order('entry_time', { ascending: true });
 
-  await supabase.from('bot_settings').upsert({
-    key: 'decay_pause_until',
-    value: decayPauseUntil,
-    updated_at: new Date().toISOString(),
-  }, { onConflict: 'key' });
+  let niftyRange = 0;
+  if (allSessionTrades && allSessionTrades.length > 0) {
+    const spots = allSessionTrades
+      .map((t: any) => Number(t.nifty_spot))
+      .filter((s: number) => s > 0);
+    if (spots.length > 0) {
+      spots.push(niftySpot); // include current
+      niftyRange = Math.max(...spots) - Math.min(...spots);
+    }
+  }
 
-  // Clear history so we start fresh after pause
-  await savePremiumHistory(supabase, []);
+  if (niftyRange >= SIDEWAYS_NIFTY_RANGE_THRESHOLD) {
+    return { skip: false, reason: `R${nextRound}: last 2 losses but Nifty range ${niftyRange.toFixed(0)}pts ≥ ${SIDEWAYS_NIFTY_RANGE_THRESHOLD}pts — market moving, proceed` };
+  }
 
-  const msg = `⚠️ *Double Decay Detected*\n\n• CE: ₹${earliest.ce.toFixed(1)}→₹${latest.ce.toFixed(1)} (${ceChange.toFixed(1)})\n• PE: ₹${earliest.pe.toFixed(1)}→₹${latest.pe.toFixed(1)} (${peChange.toFixed(1)})\n• Window: ${windowSecs}s (${history.length} snapshots)\n\n⏸️ Pausing for 15 min until ${new Date(decayPauseUntil).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })} IST`;
-  await sendTelegram(msg);
-  console.log(`Double decay confirmed! Pausing until ${decayPauseUntil}`);
-
+  // Both conditions met: consecutive losses + sideways market
   return { 
-    decayDetected: true, 
-    message: `Double decay: CE ${ceChange.toFixed(1)}, PE ${peChange.toFixed(1)}. Paused 15 min.`,
+    skip: true, 
+    reason: `R${nextRound}: last 2 rounds both losses + Nifty range only ${niftyRange.toFixed(0)}pts (< ${SIDEWAYS_NIFTY_RANGE_THRESHOLD}pts). Sideways trap detected.`,
   };
 }
 
-// Check if currently in a decay pause period — simple time-based
-async function isInDecayPause(supabase: any): Promise<{ paused: boolean; remainingMins: number; pauseUntil: string | null }> {
+// Check if currently in a sideways pause period
+async function isInSidewaysPause(supabase: any): Promise<{ paused: boolean; remainingMins: number }> {
   const { data } = await supabase
     .from('bot_settings')
     .select('value')
-    .eq('key', 'decay_pause_until')
+    .eq('key', 'sideways_pause_until')
     .maybeSingle();
 
-  if (!data?.value) return { paused: false, remainingMins: 0, pauseUntil: null };
+  if (!data?.value) return { paused: false, remainingMins: 0 };
 
   const pauseUntil = new Date(data.value).getTime();
   if (Date.now() >= pauseUntil) {
-    await supabase.from('bot_settings').delete().eq('key', 'decay_pause_until');
-    return { paused: false, remainingMins: 0, pauseUntil: data.value };
+    await supabase.from('bot_settings').delete().eq('key', 'sideways_pause_until');
+    return { paused: false, remainingMins: 0 };
   }
 
   const remainingMins = Math.ceil((pauseUntil - Date.now()) / 60000);
-  return { paused: true, remainingMins, pauseUntil: data.value };
+  return { paused: true, remainingMins };
 }
 
-// Get decay status for UI display
+async function setSidewaysPause(supabase: any): Promise<string> {
+  const pauseUntil = new Date(Date.now() + SIDEWAYS_PAUSE_DURATION_MS).toISOString();
+  await supabase.from('bot_settings').upsert({
+    key: 'sideways_pause_until',
+    value: pauseUntil,
+    updated_at: new Date().toISOString(),
+  }, { onConflict: 'key' });
+  return pauseUntil;
+}
+
+// Get sideways gate status for UI display
 async function getDecayStatus(supabase: any): Promise<any> {
-  const { data: settings } = await supabase
+  const { data } = await supabase
     .from('bot_settings')
-    .select('key, value')
-    .in('key', ['decay_ce_price', 'decay_pe_price', 'decay_pause_until', 'decay_premium_history']);
+    .select('value')
+    .eq('key', 'sideways_pause_until')
+    .maybeSingle();
 
-  if (!settings || settings.length === 0) return { active: false };
+  if (!data?.value) return { active: false };
 
-  const map: Record<string, string> = {};
-  for (const s of settings) map[s.key] = s.value;
-
-  const pauseUntil = map.decay_pause_until ? new Date(map.decay_pause_until).getTime() : null;
-  const isActive = pauseUntil ? Date.now() < pauseUntil : false;
-
-  let historyCount = 0;
-  let ceTrend: number | undefined;
-  let peTrend: number | undefined;
-  if (map.decay_premium_history) {
-    try {
-      const history: PremiumSnapshot[] = JSON.parse(map.decay_premium_history);
-      historyCount = history.length;
-      if (history.length >= 2) {
-        ceTrend = history[history.length - 1].ce - history[0].ce;
-        peTrend = history[history.length - 1].pe - history[0].pe;
-      }
-    } catch {}
-  }
+  const pauseUntil = new Date(data.value).getTime();
+  const isActive = Date.now() < pauseUntil;
 
   return {
     active: isActive,
-    ce_current: map.decay_ce_price ? parseFloat(map.decay_ce_price) : undefined,
-    pe_current: map.decay_pe_price ? parseFloat(map.decay_pe_price) : undefined,
-    pause_until: map.decay_pause_until || undefined,
-    remaining_mins: isActive ? Math.ceil((pauseUntil! - Date.now()) / 60000) : undefined,
-    history_count: historyCount,
-    ce_trend: ceTrend,
-    pe_trend: peTrend,
+    pause_until: data.value,
+    remaining_mins: isActive ? Math.ceil((pauseUntil - Date.now()) / 60000) : undefined,
+    type: 'sideways_gate',
+    description: 'Between-round sideways detection (R3+ gate)',
   };
 }
-// ========== END DOUBLE DECAY DETECTION ==========
 
 serve(async (req) => {
   if (req.method === 'OPTIONS') {
@@ -590,13 +557,8 @@ serve(async (req) => {
         }
       }
 
-      // Clear decay state on manual stop
-      await Promise.all([
-        supabase.from('bot_settings').delete().eq('key', 'decay_pause_until'),
-        supabase.from('bot_settings').delete().eq('key', 'decay_ce_price'),
-        supabase.from('bot_settings').delete().eq('key', 'decay_pe_price'),
-        supabase.from('bot_settings').delete().eq('key', 'decay_check_time'),
-      ]);
+      // Clear sideways pause on manual stop
+      await supabase.from('bot_settings').delete().eq('key', 'sideways_pause_until');
 
       return new Response(JSON.stringify({ success: true, message: 'Bot stopped' }), {
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
@@ -633,28 +595,15 @@ serve(async (req) => {
         });
       }
 
-      // Double decay check before starting (unless skipped by manual override)
+      // Check for sideways pause before starting
       if (!skipDecayCheck) {
-        // Check if currently in a decay pause
-        const decayPause = await isInDecayPause(supabase);
-        if (decayPause.paused) {
+        const sidewaysPause = await isInSidewaysPause(supabase);
+        if (sidewaysPause.paused) {
           return new Response(JSON.stringify({ 
             success: false, 
-            message: `⚠️ Double decay detected — both CE & PE premiums declining. Waiting ${decayPause.remainingMins} min before retrying.`,
+            message: `⚠️ Sideways market detected — paused for ${sidewaysPause.remainingMins} min. Will auto-restart as fresh R1.`,
             decay_paused: true,
           }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
-        }
-
-        // If decay pause just expired, recheck premiums
-        if (decayPause.pauseUntil) {
-          const decayResult = await checkAndHandleDoubleDecay(supabase, supabaseUrl, anonKey);
-          if (decayResult.decayDetected) {
-            return new Response(JSON.stringify({ 
-              success: false, 
-              message: `⚠️ ${decayResult.message}`,
-              decay_paused: true,
-            }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
-          }
         }
       }
 
@@ -747,13 +696,6 @@ serve(async (req) => {
         actualEntryPrice = buyResult.filledPrice;
       }
 
-      // Store initial premium snapshot for decay detection
-      await Promise.all([
-        supabase.from('bot_settings').upsert({ key: 'decay_ce_price', value: String(optionData.otmCEPrice), updated_at: new Date().toISOString() }, { onConflict: 'key' }),
-        supabase.from('bot_settings').upsert({ key: 'decay_pe_price', value: String(optionData.otmPEPrice), updated_at: new Date().toISOString() }, { onConflict: 'key' }),
-        supabase.from('bot_settings').upsert({ key: 'decay_check_time', value: new Date().toISOString(), updated_at: new Date().toISOString() }, { onConflict: 'key' }),
-      ]);
-
       const { data: session, error: sessErr } = await supabase
         .from('martingale_sessions')
         .insert({ status: 'active', current_round: 1, max_rounds: maxRounds, trading_mode: tradingMode })
@@ -819,20 +761,13 @@ serve(async (req) => {
           ((schedTime >= AUTO_START_1 && schedTime < AUTO_START_1 + 1) ||
            (!isExpiryDay && schedTime >= AUTO_START_2 && schedTime < AUTO_START_2 + 1))) {
         if (!existingSession) {
-          // Check for double decay before auto-starting
-          const decayPause = await isInDecayPause(supabase);
+          // Check for sideways pause before auto-starting
+          const sidewaysPause = await isInSidewaysPause(supabase);
           let shouldStart = true;
 
-          if (decayPause.paused) {
+          if (sidewaysPause.paused) {
             shouldStart = false;
-            tickResults.push(`⚠️ Double decay pause active. Skipping auto-start. ${decayPause.remainingMins} min remaining.`);
-          } else {
-            // Run decay check
-            const decayResult = await checkAndHandleDoubleDecay(supabase, supabaseUrl, anonKey);
-            if (decayResult.decayDetected) {
-              shouldStart = false;
-              tickResults.push(`⚠️ ${decayResult.message}`);
-            }
+            tickResults.push(`⚠️ Sideways pause active. Skipping auto-start. ${sidewaysPause.remainingMins} min remaining.`);
           }
 
           if (shouldStart) {
@@ -973,39 +908,9 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
       .maybeSingle();
 
     if (!activeCheck) {
-      const decayPause = await isInDecayPause(supabase);
-      if (decayPause.paused) {
-        return { success: true, message: `⚠️ Double decay pause: ${decayPause.remainingMins} min remaining. Both CE & PE premiums declining.` };
-      }
-      // If decay pause just expired, recheck
-      if (decayPause.pauseUntil) {
-        const decayResult = await checkAndHandleDoubleDecay(supabase, supabaseUrl, anonKey);
-        if (decayResult.decayDetected) {
-          return { success: true, message: `⚠️ ${decayResult.message}` };
-        }
-        // Decay cleared — try to auto-start
-        // Check if we're within trading windows
-        const isInWindow1 = tickTime >= (9 * 60 + 25) && tickTime < (11 * 60 + 15);
-        const isInWindow2 = tickTime >= (14 * 60 + 30) && tickTime < (15 * 60 + 25);
-        if (isInWindow1 || isInWindow2) {
-          const { data: settingsForStart } = await supabase.from('bot_settings').select('key, value');
-          let savedMode = 'paper';
-          let savedMaxRounds = DEFAULT_MAX_ROUNDS;
-          if (settingsForStart) {
-            for (const s of settingsForStart) {
-              if (s.key === 'trading_mode') savedMode = s.value;
-              if (s.key === 'max_rounds') savedMaxRounds = Math.min(Math.max(parseInt(s.value) || DEFAULT_MAX_ROUNDS, 1), 10);
-            }
-          }
-          const startRes = await fetch(`${supabaseUrl}/functions/v1/martingale-bot`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${anonKey}` },
-            body: JSON.stringify({ action: 'start', trading_mode: savedMode, max_rounds: savedMaxRounds, skip_decay_check: true }),
-          });
-          const startData = await startRes.json();
-          await sendTelegram(`✅ *Decay cleared — Bot Resumed*\n${decayResult.message}\n${startData.message || 'Started'}`);
-          return { success: true, action: `✅ Decay cleared. ${startData.message || 'Bot started'}` };
-        }
+      const sidewaysPause = await isInSidewaysPause(supabase);
+      if (sidewaysPause.paused) {
+        return { success: true, message: `⚠️ Sideways pause: ${sidewaysPause.remainingMins} min remaining. Will restart as fresh R1.` };
       }
     }
 
@@ -1138,79 +1043,14 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
     const pnlAmount = checkPnlAmount;
     let actionTaken = `Monitoring: ${openTrade.option_type} ${openTrade.strike_price} @ ₹${currentPrice} (${pnlPercent.toFixed(2)}%)`;
 
-    // ========== MID-SESSION DECAY CHECK ==========
-    {
-      const decayPause = await isInDecayPause(supabase);
-      if (!decayPause.paused) {
-        const decayResult = await checkAndHandleDoubleDecay(supabase, supabaseUrl, anonKey);
-        if (decayResult.decayDetected) {
-          // Square off the current trade immediately
-          if (isActual) {
-            const accessToken = await getUpstoxToken(supabase);
-            if (accessToken && currentInstrKey) {
-              await placeUpstoxOrder(accessToken, {
-                instrumentKey: currentInstrKey,
-                quantity: openTrade.lots * LOT_SIZE,
-                transactionType: 'SELL',
-                price: currentPrice,
-              });
-            }
-          }
-
-          await supabase.from('martingale_trades').update({
-            status: 'closed', exit_price: currentPrice, pnl: pnlAmount, exit_time: new Date().toISOString(),
-          }).eq('id', openTrade.id);
-
-          const finalSessionPnl = activeSession.total_pnl + pnlAmount;
-          await supabase.from('martingale_sessions').update({
-            status: 'decay_squared_off', total_pnl: finalSessionPnl, completed_at: new Date().toISOString(),
-          }).eq('id', activeSession.id);
-
-          const modeLabel = isActual ? '🔴' : '📝';
-          const msg = `${modeLabel} ⚠️ *Double Decay — Mid-Session Exit*\nR${openTrade.round} ${openTrade.option_type} ${openTrade.strike_price} @ ₹${currentPrice} (P&L: ₹${pnlAmount.toFixed(0)})\n${decayResult.message}`;
-          await sendTelegram(msg);
-
-          return {
-            success: true,
-            action: `⚠️ Decay exit R${openTrade.round} ${openTrade.option_type} @ ₹${currentPrice} (₹${pnlAmount.toFixed(0)}). Paused 15 min.`,
-          };
-        }
-      } else {
-        // We're in a decay pause but somehow have an active session — square off
-        if (isActual) {
-          const accessToken = await getUpstoxToken(supabase);
-          if (accessToken && currentInstrKey) {
-            await placeUpstoxOrder(accessToken, {
-              instrumentKey: currentInstrKey,
-              quantity: openTrade.lots * LOT_SIZE,
-              transactionType: 'SELL',
-              price: currentPrice,
-            });
-          }
-        }
-
-        await supabase.from('martingale_trades').update({
-          status: 'closed', exit_price: currentPrice, pnl: pnlAmount, exit_time: new Date().toISOString(),
-        }).eq('id', openTrade.id);
-
-        const finalSessionPnl = activeSession.total_pnl + pnlAmount;
-        await supabase.from('martingale_sessions').update({
-          status: 'decay_squared_off', total_pnl: finalSessionPnl, completed_at: new Date().toISOString(),
-        }).eq('id', activeSession.id);
-
-        return {
-          success: true,
-          action: `⚠️ Decay pause active — squared off R${openTrade.round} ${openTrade.option_type} @ ₹${currentPrice} (₹${pnlAmount.toFixed(0)}). ${decayPause.remainingMins} min remaining.`,
-        };
-      }
-    }
-    // ========== END MID-SESSION DOUBLE DECAY CHECK ==========
+    // (Mid-session decay check removed — the -2% stop loss handles intra-round exits.
+    //  Sideways detection now happens between rounds at R3+ entry.)
 
     async function startNewSession(lastOptionType: string, lastPnl: number) {
-      // Before starting a new session, check for double decay
-      const decayResult = await checkAndHandleDoubleDecay(supabase, supabaseUrl, anonKey);
-      if (decayResult.decayDetected) {
-        console.log(`New session skipped: ${decayResult.message}`);
+      // Check sideways pause before starting new session
+      const sidewaysPause = await isInSidewaysPause(supabase);
+      if (sidewaysPause.paused) {
+        console.log(`New session skipped: sideways pause active (${sidewaysPause.remainingMins} min remaining)`);
         return;
       }
 
@@ -1269,11 +1109,8 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
           entry_price: actualNewPrice, status: 'open', nifty_spot: optionData.niftySpot,
         });
 
-        // Update premium snapshot after successful entry
-        await Promise.all([
-          supabase.from('bot_settings').upsert({ key: 'decay_ce_price', value: String(optionData.otmCEPrice), updated_at: new Date().toISOString() }, { onConflict: 'key' }),
-          supabase.from('bot_settings').upsert({ key: 'decay_pe_price', value: String(optionData.otmPEPrice), updated_at: new Date().toISOString() }, { onConflict: 'key' }),
-        ]);
+
+
 
         console.log(`New session: ${newDirection} ${newStrike} @ ₹${actualNewPrice} (lastPnl=${lastPnl.toFixed(0)})`);
       }
@@ -1343,13 +1180,33 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
         actionTaken = `${modeLabel} ⛔ MAX ROUNDS (${activeSession.max_rounds}) reached. Session P&L: ₹${newTotalPnl.toFixed(0)}. Bot stopped — manual restart required.`;
         await sendTelegram(`📊 *Martingale Bot*\n\n${actionTaken}`);
       } else {
-        const newOptionType = openTrade.option_type === 'CE' ? 'PE' : 'CE';
-        const newLots = openTrade.lots * 2;
-
+        // ========== BETWEEN-ROUND SIDEWAYS GATE (R3+) ==========
         const { optionData } = await fetchNiftyOptionChain(supabaseUrl, anonKey);
         if (!optionData) {
           return { success: false, message: 'Could not fetch new option data for next round' };
         }
+
+        const sidewaysCheck = await shouldSkipNextRound(
+          supabase, activeSession.id, newRound, optionData.niftySpot, supabaseUrl, anonKey,
+        );
+
+        if (sidewaysCheck.skip) {
+          // End session, set pause, reset to R1 on next start
+          await supabase.from('martingale_sessions').update({
+            status: 'sideways_skipped', total_pnl: newTotalPnl, completed_at: new Date().toISOString(),
+            current_round: newRound - 1,
+          }).eq('id', activeSession.id);
+
+          const pauseUntil = await setSidewaysPause(supabase);
+
+          const modeLabel = isActual ? '🔴' : '📝';
+          const msg = `${modeLabel} ⚠️ *Sideways Trap Detected at R${newRound}*\n\n${sidewaysCheck.reason}\n\n⏸️ Session ended. Pausing 15 min until ${new Date(pauseUntil).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })} IST.\nNext start will be fresh R1 with base lots.`;
+          await sendTelegram(msg);
+
+          actionTaken = `⚠️ Sideways skip at R${newRound}. ${sidewaysCheck.reason}. Paused 15 min → fresh R1.`;
+          await sendTelegram(`📊 *Martingale Bot*\n\n${actionTaken}`);
+        } else {
+          // ========== PROCEED WITH NEXT ROUND ==========
 
         const newStrike = newOptionType === 'CE' ? optionData.otmCEStrike : optionData.otmPEStrike;
         const newPrice = newOptionType === 'CE' ? optionData.otmCEPrice : optionData.otmPEPrice;
@@ -1390,9 +1247,10 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
           status: 'open', nifty_spot: optionData.niftySpot,
         });
 
-        const modeLabel = isActual ? '🔴' : '📝';
-        actionTaken = `${modeLabel} 🔄 Round ${newRound}: Lost ${pnlPercent.toFixed(1)}%. Flipped to ${newLots} lots ${newStrike} ${newOptionType} @ ₹${newPrice}`;
-      }
+          const modeLabel = isActual ? '🔴' : '📝';
+          actionTaken = `${modeLabel} 🔄 Round ${newRound}: Lost ${pnlPercent.toFixed(1)}%. Flipped to ${newLots} lots ${newStrike} ${newOptionType} @ ₹${newPrice}`;
+        } // end proceed with next round
+      } // end sideways gate else
 
       await sendTelegram(`📊 *Martingale Bot*\n\n${actionTaken}`);
     }
