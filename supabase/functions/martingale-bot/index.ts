@@ -600,28 +600,15 @@ serve(async (req) => {
         });
       }
 
-      // Double decay check before starting (unless skipped by manual override)
+      // Check for sideways pause before starting
       if (!skipDecayCheck) {
-        // Check if currently in a decay pause
-        const decayPause = await isInDecayPause(supabase);
-        if (decayPause.paused) {
+        const sidewaysPause = await isInSidewaysPause(supabase);
+        if (sidewaysPause.paused) {
           return new Response(JSON.stringify({ 
             success: false, 
-            message: `⚠️ Double decay detected — both CE & PE premiums declining. Waiting ${decayPause.remainingMins} min before retrying.`,
+            message: `⚠️ Sideways market detected — paused for ${sidewaysPause.remainingMins} min. Will auto-restart as fresh R1.`,
             decay_paused: true,
           }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
-        }
-
-        // If decay pause just expired, recheck premiums
-        if (decayPause.pauseUntil) {
-          const decayResult = await checkAndHandleDoubleDecay(supabase, supabaseUrl, anonKey);
-          if (decayResult.decayDetected) {
-            return new Response(JSON.stringify({ 
-              success: false, 
-              message: `⚠️ ${decayResult.message}`,
-              decay_paused: true,
-            }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
-          }
         }
       }
 
