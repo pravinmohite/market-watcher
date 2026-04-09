@@ -820,7 +820,7 @@ serve(async (req) => {
            (!isExpiryDay && schedTime >= AUTO_START_2 && schedTime < AUTO_START_2 + 1))) {
         if (!existingSession) {
           // Check for double decay before auto-starting
-          const decayPause = await isInDecayPause(supabase, supabaseUrl, anonKey);
+          const decayPause = await isInDecayPause(supabase);
           let shouldStart = true;
 
           if (decayPause.paused) {
