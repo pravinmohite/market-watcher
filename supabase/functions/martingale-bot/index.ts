@@ -503,11 +503,11 @@ async function isInDecayPause(supabase: any, supabaseUrl?: string, anonKey?: str
 }
 
 // Get decay status for UI display
-async function getDecayStatus(supabase: any): Promise<{ active: boolean; ce_prev?: number; ce_current?: number; pe_prev?: number; pe_current?: number; pause_until?: string; remaining_mins?: number; history_count?: number }> {
+async function getDecayStatus(supabase: any): Promise<any> {
   const { data: settings } = await supabase
     .from('bot_settings')
     .select('key, value')
-    .in('key', ['decay_ce_price', 'decay_pe_price', 'decay_pause_until', 'decay_premium_history']);
+    .in('key', ['decay_ce_price', 'decay_pe_price', 'decay_pause_until', 'decay_premium_history', 'decay_breakout_high', 'decay_breakout_low']);
 
   if (!settings || settings.length === 0) return { active: false };
 
@@ -520,6 +520,7 @@ async function getDecayStatus(supabase: any): Promise<{ active: boolean; ce_prev
   let historyCount = 0;
   let ceTrend: number | undefined;
   let peTrend: number | undefined;
+  let niftyRange: number | undefined;
   if (map.decay_premium_history) {
     try {
       const history: PremiumSnapshot[] = JSON.parse(map.decay_premium_history);
@@ -527,6 +528,10 @@ async function getDecayStatus(supabase: any): Promise<{ active: boolean; ce_prev
       if (history.length >= 2) {
         ceTrend = history[history.length - 1].ce - history[0].ce;
         peTrend = history[history.length - 1].pe - history[0].pe;
+        const niftyVals = history.filter(h => h.nifty && h.nifty > 0).map(h => h.nifty!);
+        if (niftyVals.length >= 2) {
+          niftyRange = Math.max(...niftyVals) - Math.min(...niftyVals);
+        }
       }
     } catch {}
   }
@@ -540,6 +545,12 @@ async function getDecayStatus(supabase: any): Promise<{ active: boolean; ce_prev
     history_count: historyCount,
     ce_trend: ceTrend,
     pe_trend: peTrend,
+    nifty_range: niftyRange,
+    breakout_high: map.decay_breakout_high ? parseFloat(map.decay_breakout_high) : undefined,
+    breakout_low: map.decay_breakout_low ? parseFloat(map.decay_breakout_low) : undefined,
+    waiting_for_breakout: isActive,
+    min_round: DECAY_MIN_ROUND,
+    decline_threshold_pct: ((1 - DECAY_DECLINE_THRESHOLD) * 100).toFixed(0),
   };
 }
 // ========== END DOUBLE DECAY DETECTION ==========
