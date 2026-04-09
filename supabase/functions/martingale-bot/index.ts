@@ -450,23 +450,56 @@ async function checkAndHandleDoubleDecay(supabase: any, supabaseUrl: string, ano
   };
 }
 
-// Check if currently in a decay pause period
-async function isInDecayPause(supabase: any): Promise<{ paused: boolean; remainingMins: number; pauseUntil: string | null }> {
-  const { data } = await supabase
+// Check if currently in a decay pause period — supports breakout-based resume
+async function isInDecayPause(supabase: any, supabaseUrl?: string, anonKey?: string): Promise<{ paused: boolean; remainingMins: number; pauseUntil: string | null; breakoutDetected?: boolean }> {
+  const { data: settings } = await supabase
     .from('bot_settings')
-    .select('value')
-    .eq('key', 'decay_pause_until')
-    .maybeSingle();
+    .select('key, value')
+    .in('key', ['decay_pause_until', 'decay_breakout_high', 'decay_breakout_low']);
 
-  if (!data?.value) return { paused: false, remainingMins: 0, pauseUntil: null };
+  if (!settings || settings.length === 0) return { paused: false, remainingMins: 0, pauseUntil: null };
 
-  const pauseUntil = new Date(data.value).getTime();
-  if (Date.now() < pauseUntil) {
-    const remainingMins = Math.ceil((pauseUntil - Date.now()) / 60000);
-    return { paused: true, remainingMins, pauseUntil: data.value };
+  const map: Record<string, string> = {};
+  for (const s of settings) map[s.key] = s.value;
+
+  if (!map.decay_pause_until) return { paused: false, remainingMins: 0, pauseUntil: null };
+
+  const pauseUntil = new Date(map.decay_pause_until).getTime();
+  const timeExpired = Date.now() >= pauseUntil;
+  
+  // Check for breakout if we have the data
+  let breakoutDetected = false;
+  if (supabaseUrl && anonKey && map.decay_breakout_high && map.decay_breakout_low) {
+    try {
+      const { optionData } = await fetchNiftyOptionChain(supabaseUrl, anonKey);
+      if (optionData?.niftySpot) {
+        const breakoutHigh = parseFloat(map.decay_breakout_high);
+        const breakoutLow = parseFloat(map.decay_breakout_low);
+        if (optionData.niftySpot > breakoutHigh || optionData.niftySpot < breakoutLow) {
+          breakoutDetected = true;
+          console.log(`🔓 Breakout detected! Nifty ${optionData.niftySpot} broke ${optionData.niftySpot > breakoutHigh ? 'high' : 'low'} (H:${breakoutHigh}, L:${breakoutLow})`);
+        }
+      }
+    } catch (e) {
+      console.log('Breakout check error:', e);
+    }
   }
 
-  return { paused: false, remainingMins: 0, pauseUntil: data.value };
+  if (timeExpired || breakoutDetected) {
+    // Clear decay pause and breakout levels
+    await Promise.all([
+      supabase.from('bot_settings').delete().eq('key', 'decay_pause_until'),
+      supabase.from('bot_settings').delete().eq('key', 'decay_breakout_high'),
+      supabase.from('bot_settings').delete().eq('key', 'decay_breakout_low'),
+    ]);
+    if (breakoutDetected) {
+      await sendTelegram(`🔓 *Breakout Detected!* Nifty broke out of decay range. Resuming trading.`);
+    }
+    return { paused: false, remainingMins: 0, pauseUntil: map.decay_pause_until, breakoutDetected };
+  }
+
+  const remainingMins = Math.ceil((pauseUntil - Date.now()) / 60000);
+  return { paused: true, remainingMins, pauseUntil: map.decay_pause_until };
 }
 
 // Get decay status for UI display
