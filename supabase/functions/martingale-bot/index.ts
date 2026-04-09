@@ -1250,7 +1250,7 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
       const decayPause = await isInDecayPause(supabase, supabaseUrl, anonKey);
       if (!decayPause.paused) {
         // Only check every tick (not during an existing pause)
-        const decayResult = await checkAndHandleDoubleDecay(supabase, supabaseUrl, anonKey);
+        const decayResult = await checkAndHandleDoubleDecay(supabase, supabaseUrl, anonKey, openTrade.round);
         if (decayResult.decayDetected) {
           // Square off the current trade immediately
           if (isActual) {
