@@ -15,7 +15,11 @@ const ORDER_FILL_MAX_RETRIES = 3;
 const ORDER_FILL_CHECK_INTERVAL_MS = 8000;
 const ORDER_FILL_MAX_CHECKS = 3;
 const PAUSE_DURATION_MS = 10 * 60 * 1000;
-const DECAY_PAUSE_DURATION_MS = 15 * 60 * 1000; // 15 minutes for decay pause
+const DECAY_PAUSE_DURATION_MS = 30 * 60 * 1000; // 30 min max breakout wait cap
+const DECAY_MIN_ROUND = 2; // Only check decay after Round 2
+const DECAY_DECLINE_THRESHOLD = 0.98; // 2% decline required (latest < earliest * 0.98)
+const STRONG_TREND_POINTS = 80; // Nifty move > 80pts in 5min = strong trend → ignore decay
+const BASE_RANGE_THRESHOLD = 50; // Base range threshold in points
 
 async function getDailyPnl(supabase: any): Promise<number> {
   const nowIST = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
@@ -290,6 +294,7 @@ interface PremiumSnapshot {
   t: number; // timestamp ms
   ce: number;
   pe: number;
+  nifty?: number; // nifty spot for range/trend calculation
 }
 
 async function getPremiumHistory(supabase: any): Promise<PremiumSnapshot[]> {
@@ -312,7 +317,7 @@ async function savePremiumHistory(supabase: any, history: PremiumSnapshot[]): Pr
   }, { onConflict: 'key' });
 }
 
-async function checkAndHandleDoubleDecay(supabase: any, supabaseUrl: string, anonKey: string): Promise<{ decayDetected: boolean; message: string }> {
+async function checkAndHandleDoubleDecay(supabase: any, supabaseUrl: string, anonKey: string, currentRound?: number): Promise<{ decayDetected: boolean; message: string; trendOverride?: boolean; niftyRange?: number }> {
   const { optionData } = await fetchNiftyOptionChain(supabaseUrl, anonKey);
   if (!optionData || !optionData.otmCEPrice || !optionData.otmPEPrice) {
     return { decayDetected: false, message: 'Cannot check decay: no option data' };
@@ -321,10 +326,11 @@ async function checkAndHandleDoubleDecay(supabase: any, supabaseUrl: string, ano
   const now = Date.now();
   const currentCE = optionData.otmCEPrice;
   const currentPE = optionData.otmPEPrice;
+  const niftySpot = optionData.niftySpot || 0;
 
-  // Load history, append current, trim to 5-minute window
+  // Load history, append current (with nifty spot), trim to 5-minute window
   let history = await getPremiumHistory(supabase);
-  history.push({ t: now, ce: currentCE, pe: currentPE });
+  history.push({ t: now, ce: currentCE, pe: currentPE, nifty: niftySpot });
   history = history.filter(s => now - s.t <= DECAY_LOOKBACK_MS);
   await savePremiumHistory(supabase, history);
 
@@ -334,77 +340,174 @@ async function checkAndHandleDoubleDecay(supabase: any, supabaseUrl: string, ano
     supabase.from('bot_settings').upsert({ key: 'decay_pe_price', value: String(currentPE), updated_at: new Date().toISOString() }, { onConflict: 'key' }),
   ]);
 
-  // Need at least 2 minutes of data (enough ticks to confirm a trend, not just noise)
-  const oldestAllowed = now - DECAY_LOOKBACK_MS;
-  const oldEntries = history.filter(s => s.t <= now - 2 * 60 * 1000); // entries from 2+ mins ago
+  // Need at least 2 minutes of data
+  const oldEntries = history.filter(s => s.t <= now - 2 * 60 * 1000);
   if (oldEntries.length === 0) {
     console.log(`Decay check: Building history (${history.length} snapshots). CE=₹${currentCE}, PE=₹${currentPE}`);
     return { decayDetected: false, message: `Building premium history (${history.length} snapshots)` };
   }
 
-  // Compare: earliest entry in window vs latest entry
   const earliest = history[0];
   const latest = history[history.length - 1];
+  const windowSecs = Math.round((latest.t - earliest.t) / 1000);
 
+  // ===== STEP 1: TREND OVERRIDE (highest priority) =====
+  // If Nifty moved > 80pts in 5min, it's a strong trend — ignore decay completely
+  const niftyMove = Math.abs((latest.nifty || 0) - (earliest.nifty || 0));
+  if (niftyMove > STRONG_TREND_POINTS) {
+    console.log(`🚀 Strong trend detected: Nifty moved ${niftyMove.toFixed(0)}pts in ${windowSecs}s. Ignoring decay.`);
+    // Clear any existing decay pause since trend is strong
+    await supabase.from('bot_settings').delete().eq('key', 'decay_pause_until');
+    return { 
+      decayDetected: false, 
+      message: `Strong trend: Nifty ${niftyMove.toFixed(0)}pts move. Decay ignored.`, 
+      trendOverride: true,
+      niftyRange: niftyMove,
+    };
+  }
+
+  // ===== STEP 2: Round gate — only check decay after Round 2 =====
+  if (currentRound !== undefined && currentRound < DECAY_MIN_ROUND) {
+    console.log(`Decay check skipped: Round ${currentRound} < ${DECAY_MIN_ROUND}. Allowing recovery.`);
+    return { decayDetected: false, message: `Round ${currentRound}: Decay check deferred (< R${DECAY_MIN_ROUND})` };
+  }
+
+  // ===== STEP 3: Premium decline with 2% threshold =====
+  const ceDecline = latest.ce < earliest.ce * DECAY_DECLINE_THRESHOLD;
+  const peDecline = latest.pe < earliest.pe * DECAY_DECLINE_THRESHOLD;
   const ceChange = latest.ce - earliest.ce;
   const peChange = latest.pe - earliest.pe;
-  const ceDecreasing = ceChange < 0;
-  const peDecreasing = peChange < 0;
 
-  const windowSecs = Math.round((latest.t - earliest.t) / 1000);
-  console.log(`Decay trend (${windowSecs}s window, ${history.length} pts): CE ₹${earliest.ce.toFixed(1)}→₹${latest.ce.toFixed(1)} (${ceDecreasing ? '↓' : '↑'}${Math.abs(ceChange).toFixed(1)}), PE ₹${earliest.pe.toFixed(1)}→₹${latest.pe.toFixed(1)} (${peDecreasing ? '↓' : '↑'}${Math.abs(peChange).toFixed(1)})`);
+  console.log(`Decay trend (${windowSecs}s, ${history.length}pts): CE ₹${earliest.ce.toFixed(1)}→₹${latest.ce.toFixed(1)} (${ceDecline ? '↓≥2%' : 'OK'}), PE ₹${earliest.pe.toFixed(1)}→₹${latest.pe.toFixed(1)} (${peDecline ? '↓≥2%' : 'OK'}), Nifty range: ${niftyMove.toFixed(0)}pts`);
 
-  if (ceDecreasing && peDecreasing) {
-    // Both declining over the window — set decay pause
-    const decayPauseUntil = new Date(Date.now() + DECAY_PAUSE_DURATION_MS).toISOString();
-    await supabase.from('bot_settings').upsert({
+  if (!ceDecline || !peDecline) {
+    // At least one premium NOT declining ≥2% — no decay
+    const risingLabel = !ceDecline ? 'CE' : 'PE';
+    return { decayDetected: false, message: `${risingLabel} stable/rising. No decay.`, niftyRange: niftyMove };
+  }
+
+  // ===== STEP 4: Market range confirmation (adaptive threshold) =====
+  // Compute ATR-like range from nifty history
+  const niftyValues = history.filter(h => h.nifty && h.nifty > 0).map(h => h.nifty!);
+  let dynamicThreshold = BASE_RANGE_THRESHOLD;
+  if (niftyValues.length >= 2) {
+    const niftyHigh = Math.max(...niftyValues);
+    const niftyLow = Math.min(...niftyValues);
+    const atr5min = niftyHigh - niftyLow;
+    dynamicThreshold = Math.max(BASE_RANGE_THRESHOLD, atr5min * 0.6);
+  }
+
+  const niftyRange = niftyValues.length >= 2 
+    ? Math.max(...niftyValues) - Math.min(...niftyValues)
+    : niftyMove;
+
+  if (niftyRange >= dynamicThreshold) {
+    console.log(`Decay premiums declining but Nifty range ${niftyRange.toFixed(0)}pts ≥ threshold ${dynamicThreshold.toFixed(0)}pts. Not a sideways trap.`);
+    return { 
+      decayDetected: false, 
+      message: `Both declining ≥2% but Nifty range ${niftyRange.toFixed(0)}pts (threshold: ${dynamicThreshold.toFixed(0)}). Not sideways.`,
+      niftyRange,
+    };
+  }
+
+  // ===== ALL CONDITIONS MET: decay confirmed =====
+  // Both CE & PE declining ≥2%, market is range-bound, round ≥ 2, no strong trend
+  const decayPauseUntil = new Date(Date.now() + DECAY_PAUSE_DURATION_MS).toISOString();
+  
+  // Store breakout reference levels for smart restart
+  const breakoutHigh = niftyValues.length > 0 ? Math.max(...niftyValues) : niftySpot + 25;
+  const breakoutLow = niftyValues.length > 0 ? Math.min(...niftyValues) : niftySpot - 25;
+  
+  await Promise.all([
+    supabase.from('bot_settings').upsert({
       key: 'decay_pause_until',
       value: decayPauseUntil,
       updated_at: new Date().toISOString(),
-    }, { onConflict: 'key' });
+    }, { onConflict: 'key' }),
+    supabase.from('bot_settings').upsert({
+      key: 'decay_breakout_high',
+      value: String(breakoutHigh),
+      updated_at: new Date().toISOString(),
+    }, { onConflict: 'key' }),
+    supabase.from('bot_settings').upsert({
+      key: 'decay_breakout_low',
+      value: String(breakoutLow),
+      updated_at: new Date().toISOString(),
+    }, { onConflict: 'key' }),
+  ]);
 
-    // Clear history so we start fresh after pause
-    await savePremiumHistory(supabase, []);
+  // Clear history so we start fresh after pause
+  await savePremiumHistory(supabase, []);
 
-    const msg = `⚠️ *Double Decay Detected (5-min trend)*\n\nCE: ₹${earliest.ce.toFixed(1)}→₹${latest.ce.toFixed(1)} (${ceChange.toFixed(1)})\nPE: ₹${earliest.pe.toFixed(1)}→₹${latest.pe.toFixed(1)} (${peChange.toFixed(1)})\nWindow: ${windowSecs}s, ${history.length} data points\nBot paused 15 mins until ${new Date(decayPauseUntil).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })} IST`;
-    await sendTelegram(msg);
-    console.log(`Double decay detected (trend)! Pausing until ${decayPauseUntil}`);
+  const msg = `⚠️ *Double Decay Confirmed (Refined)*\n\n🔍 *Conditions Met:*\n• Round ≥ ${DECAY_MIN_ROUND} ✅\n• CE: ₹${earliest.ce.toFixed(1)}→₹${latest.ce.toFixed(1)} (↓${Math.abs(ceChange).toFixed(1)}, ≥2%) ✅\n• PE: ₹${earliest.pe.toFixed(1)}→₹${latest.pe.toFixed(1)} (↓${Math.abs(peChange).toFixed(1)}, ≥2%) ✅\n• Nifty range: ${niftyRange.toFixed(0)}pts < ${dynamicThreshold.toFixed(0)}pts (sideways) ✅\n• No strong trend (${niftyMove.toFixed(0)}pts < ${STRONG_TREND_POINTS}pts) ✅\n\n⏸️ Waiting for breakout (High: ${breakoutHigh.toFixed(0)} / Low: ${breakoutLow.toFixed(0)})\nMax wait: 30 min until ${new Date(decayPauseUntil).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })} IST`;
+  await sendTelegram(msg);
+  console.log(`Double decay confirmed! Pausing until breakout or ${decayPauseUntil}`);
 
-    return { decayDetected: true, message: `Double decay (5-min trend): CE ${ceChange.toFixed(1)}, PE ${peChange.toFixed(1)}. Paused 15 min.` };
-  }
-
-  // At least one premium trending up — clear any decay pause
-  await supabase.from('bot_settings').delete().eq('key', 'decay_pause_until');
-  const risingLabel = !ceDecreasing ? 'CE' : 'PE';
-  console.log(`Decay trend OK: ${risingLabel} rising over ${windowSecs}s.`);
-  return { decayDetected: false, message: `${risingLabel} premium trending up. Trading allowed.` };
+  return { 
+    decayDetected: true, 
+    message: `Double decay: CE ↓${Math.abs(ceChange).toFixed(1)}, PE ↓${Math.abs(peChange).toFixed(1)}, range ${niftyRange.toFixed(0)}pts. Waiting for breakout (max 30min).`,
+    niftyRange,
+  };
 }
 
-// Check if currently in a decay pause period
-async function isInDecayPause(supabase: any): Promise<{ paused: boolean; remainingMins: number; pauseUntil: string | null }> {
-  const { data } = await supabase
-    .from('bot_settings')
-    .select('value')
-    .eq('key', 'decay_pause_until')
-    .maybeSingle();
-
-  if (!data?.value) return { paused: false, remainingMins: 0, pauseUntil: null };
-
-  const pauseUntil = new Date(data.value).getTime();
-  if (Date.now() < pauseUntil) {
-    const remainingMins = Math.ceil((pauseUntil - Date.now()) / 60000);
-    return { paused: true, remainingMins, pauseUntil: data.value };
-  }
-
-  return { paused: false, remainingMins: 0, pauseUntil: data.value };
-}
-
-// Get decay status for UI display
-async function getDecayStatus(supabase: any): Promise<{ active: boolean; ce_prev?: number; ce_current?: number; pe_prev?: number; pe_current?: number; pause_until?: string; remaining_mins?: number; history_count?: number }> {
+// Check if currently in a decay pause period — supports breakout-based resume
+async function isInDecayPause(supabase: any, supabaseUrl?: string, anonKey?: string): Promise<{ paused: boolean; remainingMins: number; pauseUntil: string | null; breakoutDetected?: boolean }> {
   const { data: settings } = await supabase
     .from('bot_settings')
     .select('key, value')
-    .in('key', ['decay_ce_price', 'decay_pe_price', 'decay_pause_until', 'decay_premium_history']);
+    .in('key', ['decay_pause_until', 'decay_breakout_high', 'decay_breakout_low']);
+
+  if (!settings || settings.length === 0) return { paused: false, remainingMins: 0, pauseUntil: null };
+
+  const map: Record<string, string> = {};
+  for (const s of settings) map[s.key] = s.value;
+
+  if (!map.decay_pause_until) return { paused: false, remainingMins: 0, pauseUntil: null };
+
+  const pauseUntil = new Date(map.decay_pause_until).getTime();
+  const timeExpired = Date.now() >= pauseUntil;
+  
+  // Check for breakout if we have the data
+  let breakoutDetected = false;
+  if (supabaseUrl && anonKey && map.decay_breakout_high && map.decay_breakout_low) {
+    try {
+      const { optionData } = await fetchNiftyOptionChain(supabaseUrl, anonKey);
+      if (optionData?.niftySpot) {
+        const breakoutHigh = parseFloat(map.decay_breakout_high);
+        const breakoutLow = parseFloat(map.decay_breakout_low);
+        if (optionData.niftySpot > breakoutHigh || optionData.niftySpot < breakoutLow) {
+          breakoutDetected = true;
+          console.log(`🔓 Breakout detected! Nifty ${optionData.niftySpot} broke ${optionData.niftySpot > breakoutHigh ? 'high' : 'low'} (H:${breakoutHigh}, L:${breakoutLow})`);
+        }
+      }
+    } catch (e) {
+      console.log('Breakout check error:', e);
+    }
+  }
+
+  if (timeExpired || breakoutDetected) {
+    // Clear decay pause and breakout levels
+    await Promise.all([
+      supabase.from('bot_settings').delete().eq('key', 'decay_pause_until'),
+      supabase.from('bot_settings').delete().eq('key', 'decay_breakout_high'),
+      supabase.from('bot_settings').delete().eq('key', 'decay_breakout_low'),
+    ]);
+    if (breakoutDetected) {
+      await sendTelegram(`🔓 *Breakout Detected!* Nifty broke out of decay range. Resuming trading.`);
+    }
+    return { paused: false, remainingMins: 0, pauseUntil: map.decay_pause_until, breakoutDetected };
+  }
+
+  const remainingMins = Math.ceil((pauseUntil - Date.now()) / 60000);
+  return { paused: true, remainingMins, pauseUntil: map.decay_pause_until };
+}
+
+// Get decay status for UI display
+async function getDecayStatus(supabase: any): Promise<any> {
+  const { data: settings } = await supabase
+    .from('bot_settings')
+    .select('key, value')
+    .in('key', ['decay_ce_price', 'decay_pe_price', 'decay_pause_until', 'decay_premium_history', 'decay_breakout_high', 'decay_breakout_low']);
 
   if (!settings || settings.length === 0) return { active: false };
 
@@ -417,6 +520,7 @@ async function getDecayStatus(supabase: any): Promise<{ active: boolean; ce_prev
   let historyCount = 0;
   let ceTrend: number | undefined;
   let peTrend: number | undefined;
+  let niftyRange: number | undefined;
   if (map.decay_premium_history) {
     try {
       const history: PremiumSnapshot[] = JSON.parse(map.decay_premium_history);
@@ -424,6 +528,10 @@ async function getDecayStatus(supabase: any): Promise<{ active: boolean; ce_prev
       if (history.length >= 2) {
         ceTrend = history[history.length - 1].ce - history[0].ce;
         peTrend = history[history.length - 1].pe - history[0].pe;
+        const niftyVals = history.filter(h => h.nifty && h.nifty > 0).map(h => h.nifty!);
+        if (niftyVals.length >= 2) {
+          niftyRange = Math.max(...niftyVals) - Math.min(...niftyVals);
+        }
       }
     } catch {}
   }
@@ -437,6 +545,12 @@ async function getDecayStatus(supabase: any): Promise<{ active: boolean; ce_prev
     history_count: historyCount,
     ce_trend: ceTrend,
     pe_trend: peTrend,
+    nifty_range: niftyRange,
+    breakout_high: map.decay_breakout_high ? parseFloat(map.decay_breakout_high) : undefined,
+    breakout_low: map.decay_breakout_low ? parseFloat(map.decay_breakout_low) : undefined,
+    waiting_for_breakout: isActive,
+    min_round: DECAY_MIN_ROUND,
+    decline_threshold_pct: ((1 - DECAY_DECLINE_THRESHOLD) * 100).toFixed(0),
   };
 }
 // ========== END DOUBLE DECAY DETECTION ==========
@@ -638,7 +752,7 @@ serve(async (req) => {
       // Double decay check before starting (unless skipped by manual override)
       if (!skipDecayCheck) {
         // Check if currently in a decay pause
-        const decayPause = await isInDecayPause(supabase);
+        const decayPause = await isInDecayPause(supabase, supabaseUrl, anonKey);
         if (decayPause.paused) {
           return new Response(JSON.stringify({ 
             success: false, 
@@ -822,7 +936,7 @@ serve(async (req) => {
            (!isExpiryDay && schedTime >= AUTO_START_2 && schedTime < AUTO_START_2 + 1))) {
         if (!existingSession) {
           // Check for double decay before auto-starting
-          const decayPause = await isInDecayPause(supabase);
+          const decayPause = await isInDecayPause(supabase, supabaseUrl, anonKey);
           let shouldStart = true;
 
           if (decayPause.paused) {
@@ -975,7 +1089,7 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
       .maybeSingle();
 
     if (!activeCheck) {
-      const decayPause = await isInDecayPause(supabase);
+      const decayPause = await isInDecayPause(supabase, supabaseUrl, anonKey);
       if (decayPause.paused) {
         return { success: true, message: `⚠️ Double decay pause: ${decayPause.remainingMins} min remaining. Both CE & PE premiums declining.` };
       }
@@ -1140,14 +1254,12 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
     const pnlAmount = checkPnlAmount;
     let actionTaken = `Monitoring: ${openTrade.option_type} ${openTrade.strike_price} @ ₹${currentPrice} (${pnlPercent.toFixed(2)}%)`;
 
-    // ========== MID-SESSION DOUBLE DECAY CHECK ==========
-    // Continuously check if both CE & PE premiums are declining.
-    // If so, square off current trade immediately and pause for 15 mins.
+    // ========== MID-SESSION REFINED DECAY CHECK ==========
+    // Priority: 1) Strong trend → ignore  2) Round < 2 → skip  3) Both ≥2% decline + range-bound → exit
     {
-      const decayPause = await isInDecayPause(supabase);
+      const decayPause = await isInDecayPause(supabase, supabaseUrl, anonKey);
       if (!decayPause.paused) {
-        // Only check every tick (not during an existing pause)
-        const decayResult = await checkAndHandleDoubleDecay(supabase, supabaseUrl, anonKey);
+        const decayResult = await checkAndHandleDoubleDecay(supabase, supabaseUrl, anonKey, openTrade.round);
         if (decayResult.decayDetected) {
           // Square off the current trade immediately
           if (isActual) {
@@ -1172,12 +1284,12 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
           }).eq('id', activeSession.id);
 
           const modeLabel = isActual ? '🔴' : '📝';
-          const msg = `${modeLabel} ⚠️ *Double Decay — Mid-Session Square Off*\nR${openTrade.round} ${openTrade.option_type} ${openTrade.strike_price} @ ₹${currentPrice} (P&L: ₹${pnlAmount.toFixed(0)})\n${decayResult.message}\nBot paused for 15 mins.`;
+          const msg = `${modeLabel} ⚠️ *Refined Decay — Mid-Session Exit*\nR${openTrade.round} ${openTrade.option_type} ${openTrade.strike_price} @ ₹${currentPrice} (P&L: ₹${pnlAmount.toFixed(0)})\n${decayResult.message}\nWaiting for breakout (max 30 min).`;
           await sendTelegram(msg);
 
           return {
             success: true,
-            action: `⚠️ Double Decay! Squared off R${openTrade.round} ${openTrade.option_type} @ ₹${currentPrice} (₹${pnlAmount.toFixed(0)}). Paused 15 min.`,
+            action: `⚠️ Decay exit R${openTrade.round} ${openTrade.option_type} @ ₹${currentPrice} (₹${pnlAmount.toFixed(0)}). Waiting for breakout.`,
           };
         }
       } else {
