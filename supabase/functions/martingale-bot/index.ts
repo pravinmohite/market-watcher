@@ -1353,6 +1353,33 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
         actionTaken = `${modeLabel} ⛔ MAX ROUNDS (${activeSession.max_rounds}) reached. Session P&L: ₹${newTotalPnl.toFixed(0)}. Bot stopped — manual restart required.`;
         await sendTelegram(`📊 *Martingale Bot*\n\n${actionTaken}`);
       } else {
+        // ========== CONSECUTIVE LOSS DECAY CHECK BEFORE NEXT ROUND ==========
+        // After closing a losing trade, check if we have consecutive alternating losses.
+        // If detected, stop the session and pause for 15 mins instead of entering the next round.
+        const consecutiveLossResult = await checkConsecutiveLossDecay(supabase, activeSession.id);
+        if (consecutiveLossResult.decayDetected) {
+          // Set decay pause
+          const decayPauseUntil = new Date(Date.now() + DECAY_PAUSE_DURATION_MS).toISOString();
+          await supabase.from('bot_settings').upsert({
+            key: 'decay_pause_until',
+            value: decayPauseUntil,
+            updated_at: new Date().toISOString(),
+          }, { onConflict: 'key' });
+
+          await supabase.from('martingale_sessions').update({
+            status: 'decay_squared_off', total_pnl: newTotalPnl,
+            completed_at: new Date().toISOString(), current_round: activeSession.current_round,
+          }).eq('id', activeSession.id);
+
+          const modeLabel = isActual ? '🔴' : '📝';
+          actionTaken = `${modeLabel} ⚠️ *Consecutive Loss Decay Detected at R${activeSession.current_round}*\n${consecutiveLossResult.message}\nSession stopped. Bot paused for 15 mins until ${new Date(decayPauseUntil).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })} IST.`;
+          await sendTelegram(actionTaken);
+          console.log(`Consecutive loss decay triggered at R${activeSession.current_round}. Session P&L: ₹${newTotalPnl.toFixed(0)}`);
+
+          return { success: true, action: actionTaken };
+        }
+        // ========== END CONSECUTIVE LOSS DECAY CHECK ==========
+
         const newOptionType = openTrade.option_type === 'CE' ? 'PE' : 'CE';
         const newLots = openTrade.lots * 2;
 
