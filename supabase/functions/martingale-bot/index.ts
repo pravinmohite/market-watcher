@@ -294,6 +294,7 @@ interface PremiumSnapshot {
   t: number; // timestamp ms
   ce: number;
   pe: number;
+  nifty?: number; // nifty spot for range/trend calculation
 }
 
 async function getPremiumHistory(supabase: any): Promise<PremiumSnapshot[]> {
