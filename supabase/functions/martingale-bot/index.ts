@@ -920,39 +920,9 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
       .maybeSingle();
 
     if (!activeCheck) {
-      const decayPause = await isInDecayPause(supabase);
-      if (decayPause.paused) {
-        return { success: true, message: `⚠️ Double decay pause: ${decayPause.remainingMins} min remaining. Both CE & PE premiums declining.` };
-      }
-      // If decay pause just expired, recheck
-      if (decayPause.pauseUntil) {
-        const decayResult = await checkAndHandleDoubleDecay(supabase, supabaseUrl, anonKey);
-        if (decayResult.decayDetected) {
-          return { success: true, message: `⚠️ ${decayResult.message}` };
-        }
-        // Decay cleared — try to auto-start
-        // Check if we're within trading windows
-        const isInWindow1 = tickTime >= (9 * 60 + 25) && tickTime < (11 * 60 + 15);
-        const isInWindow2 = tickTime >= (14 * 60 + 30) && tickTime < (15 * 60 + 25);
-        if (isInWindow1 || isInWindow2) {
-          const { data: settingsForStart } = await supabase.from('bot_settings').select('key, value');
-          let savedMode = 'paper';
-          let savedMaxRounds = DEFAULT_MAX_ROUNDS;
-          if (settingsForStart) {
-            for (const s of settingsForStart) {
-              if (s.key === 'trading_mode') savedMode = s.value;
-              if (s.key === 'max_rounds') savedMaxRounds = Math.min(Math.max(parseInt(s.value) || DEFAULT_MAX_ROUNDS, 1), 10);
-            }
-          }
-          const startRes = await fetch(`${supabaseUrl}/functions/v1/martingale-bot`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${anonKey}` },
-            body: JSON.stringify({ action: 'start', trading_mode: savedMode, max_rounds: savedMaxRounds, skip_decay_check: true }),
-          });
-          const startData = await startRes.json();
-          await sendTelegram(`✅ *Decay cleared — Bot Resumed*\n${decayResult.message}\n${startData.message || 'Started'}`);
-          return { success: true, action: `✅ Decay cleared. ${startData.message || 'Bot started'}` };
-        }
+      const sidewaysPause = await isInSidewaysPause(supabase);
+      if (sidewaysPause.paused) {
+        return { success: true, message: `⚠️ Sideways pause: ${sidewaysPause.remainingMins} min remaining. Will restart as fresh R1.` };
       }
     }
 
