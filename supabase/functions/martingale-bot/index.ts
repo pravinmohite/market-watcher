@@ -973,7 +973,7 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
       .maybeSingle();
 
     if (!activeCheck) {
-      const decayPause = await isInDecayPause(supabase, supabaseUrl, anonKey);
+      const decayPause = await isInDecayPause(supabase);
       if (decayPause.paused) {
         return { success: true, message: `⚠️ Double decay pause: ${decayPause.remainingMins} min remaining. Both CE & PE premiums declining.` };
       }
