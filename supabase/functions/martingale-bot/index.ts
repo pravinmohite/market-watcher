@@ -15,7 +15,9 @@ const ORDER_FILL_MAX_RETRIES = 3;
 const ORDER_FILL_CHECK_INTERVAL_MS = 8000;
 const ORDER_FILL_MAX_CHECKS = 3;
 const PAUSE_DURATION_MS = 10 * 60 * 1000;
-const DECAY_PAUSE_DURATION_MS = 15 * 60 * 1000; // 15 min pause on decay detection
+const SIDEWAYS_PAUSE_DURATION_MS = 15 * 60 * 1000; // 15 min pause after sideways skip
+const SIDEWAYS_MIN_ROUND = 3; // Only gate entry from R3 onwards
+const SIDEWAYS_NIFTY_RANGE_THRESHOLD = 50; // Nifty range < 50pts in last 15min = sideways
 
 async function getDailyPnl(supabase: any): Promise<number> {
   const nowIST = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
