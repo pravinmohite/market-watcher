@@ -15,11 +15,7 @@ const ORDER_FILL_MAX_RETRIES = 3;
 const ORDER_FILL_CHECK_INTERVAL_MS = 8000;
 const ORDER_FILL_MAX_CHECKS = 3;
 const PAUSE_DURATION_MS = 10 * 60 * 1000;
-const DECAY_PAUSE_DURATION_MS = 30 * 60 * 1000; // 30 min max breakout wait cap
-const DECAY_MIN_ROUND = 2; // Only check decay after Round 2
-const DECAY_DECLINE_THRESHOLD = 0.98; // 2% decline required (latest < earliest * 0.98)
-const STRONG_TREND_POINTS = 80; // Nifty move > 80pts in 5min = strong trend → ignore decay
-const BASE_RANGE_THRESHOLD = 50; // Base range threshold in points
+const DECAY_PAUSE_DURATION_MS = 15 * 60 * 1000; // 15 min pause on decay detection
 
 async function getDailyPnl(supabase: any): Promise<number> {
   const nowIST = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
