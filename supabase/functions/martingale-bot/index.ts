@@ -18,6 +18,7 @@ const PAUSE_DURATION_MS = 10 * 60 * 1000;
 const SIDEWAYS_PAUSE_DURATION_MS = 15 * 60 * 1000; // 15 min pause after sideways skip
 const SIDEWAYS_MIN_ROUND = 3; // Only gate entry from R3 onwards
 const SIDEWAYS_NIFTY_RANGE_THRESHOLD = 50; // Nifty range < 50pts in last 15min = sideways
+const SIDEWAYS_PREMIUM_DECLINE_RATIO = 0.97; // Both premiums down >3% from R1 = decay
 
 async function getDailyPnl(supabase: any): Promise<number> {
   const nowIST = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
