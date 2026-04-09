@@ -1254,13 +1254,11 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
     const pnlAmount = checkPnlAmount;
     let actionTaken = `Monitoring: ${openTrade.option_type} ${openTrade.strike_price} @ ₹${currentPrice} (${pnlPercent.toFixed(2)}%)`;
 
-    // ========== MID-SESSION DOUBLE DECAY CHECK ==========
-    // Continuously check if both CE & PE premiums are declining.
-    // If so, square off current trade immediately and pause for 15 mins.
+    // ========== MID-SESSION REFINED DECAY CHECK ==========
+    // Priority: 1) Strong trend → ignore  2) Round < 2 → skip  3) Both ≥2% decline + range-bound → exit
     {
       const decayPause = await isInDecayPause(supabase, supabaseUrl, anonKey);
       if (!decayPause.paused) {
-        // Only check every tick (not during an existing pause)
         const decayResult = await checkAndHandleDoubleDecay(supabase, supabaseUrl, anonKey, openTrade.round);
         if (decayResult.decayDetected) {
           // Square off the current trade immediately
@@ -1286,12 +1284,12 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
           }).eq('id', activeSession.id);
 
           const modeLabel = isActual ? '🔴' : '📝';
-          const msg = `${modeLabel} ⚠️ *Double Decay — Mid-Session Square Off*\nR${openTrade.round} ${openTrade.option_type} ${openTrade.strike_price} @ ₹${currentPrice} (P&L: ₹${pnlAmount.toFixed(0)})\n${decayResult.message}\nBot paused for 15 mins.`;
+          const msg = `${modeLabel} ⚠️ *Refined Decay — Mid-Session Exit*\nR${openTrade.round} ${openTrade.option_type} ${openTrade.strike_price} @ ₹${currentPrice} (P&L: ₹${pnlAmount.toFixed(0)})\n${decayResult.message}\nWaiting for breakout (max 30 min).`;
           await sendTelegram(msg);
 
           return {
             success: true,
-            action: `⚠️ Double Decay! Squared off R${openTrade.round} ${openTrade.option_type} @ ₹${currentPrice} (₹${pnlAmount.toFixed(0)}). Paused 15 min.`,
+            action: `⚠️ Decay exit R${openTrade.round} ${openTrade.option_type} @ ₹${currentPrice} (₹${pnlAmount.toFixed(0)}). Waiting for breakout.`,
           };
         }
       } else {
