@@ -1192,13 +1192,33 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
         actionTaken = `${modeLabel} ⛔ MAX ROUNDS (${activeSession.max_rounds}) reached. Session P&L: ₹${newTotalPnl.toFixed(0)}. Bot stopped — manual restart required.`;
         await sendTelegram(`📊 *Martingale Bot*\n\n${actionTaken}`);
       } else {
-        const newOptionType = openTrade.option_type === 'CE' ? 'PE' : 'CE';
-        const newLots = openTrade.lots * 2;
-
+        // ========== BETWEEN-ROUND SIDEWAYS GATE (R3+) ==========
         const { optionData } = await fetchNiftyOptionChain(supabaseUrl, anonKey);
         if (!optionData) {
           return { success: false, message: 'Could not fetch new option data for next round' };
         }
+
+        const sidewaysCheck = await shouldSkipNextRound(
+          supabase, activeSession.id, newRound, optionData.niftySpot, supabaseUrl, anonKey,
+        );
+
+        if (sidewaysCheck.skip) {
+          // End session, set pause, reset to R1 on next start
+          await supabase.from('martingale_sessions').update({
+            status: 'sideways_skipped', total_pnl: newTotalPnl, completed_at: new Date().toISOString(),
+            current_round: newRound - 1,
+          }).eq('id', activeSession.id);
+
+          const pauseUntil = await setSidewaysPause(supabase);
+
+          const modeLabel = isActual ? '🔴' : '📝';
+          const msg = `${modeLabel} ⚠️ *Sideways Trap Detected at R${newRound}*\n\n${sidewaysCheck.reason}\n\n⏸️ Session ended. Pausing 15 min until ${new Date(pauseUntil).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })} IST.\nNext start will be fresh R1 with base lots.`;
+          await sendTelegram(msg);
+
+          actionTaken = `⚠️ Sideways skip at R${newRound}. ${sidewaysCheck.reason}. Paused 15 min → fresh R1.`;
+          await sendTelegram(`📊 *Martingale Bot*\n\n${actionTaken}`);
+        } else {
+          // ========== PROCEED WITH NEXT ROUND ==========
 
         const newStrike = newOptionType === 'CE' ? optionData.otmCEStrike : optionData.otmPEStrike;
         const newPrice = newOptionType === 'CE' ? optionData.otmCEPrice : optionData.otmPEPrice;
