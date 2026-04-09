@@ -1196,6 +1196,8 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
 
       const newRound = activeSession.current_round + 1;
       const newTotalPnl = activeSession.total_pnl + pnlAmount;
+      const newOptionType = openTrade.option_type === 'CE' ? 'PE' : 'CE';
+      const newLots = Math.pow(2, newRound - 1);
 
       if (newRound > activeSession.max_rounds) {
         await supabase.from('martingale_sessions').update({
