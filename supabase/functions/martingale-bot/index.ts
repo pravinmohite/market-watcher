@@ -636,7 +636,7 @@ serve(async (req) => {
       // Double decay check before starting (unless skipped by manual override)
       if (!skipDecayCheck) {
         // Check if currently in a decay pause
-        const decayPause = await isInDecayPause(supabase, supabaseUrl, anonKey);
+        const decayPause = await isInDecayPause(supabase);
         if (decayPause.paused) {
           return new Response(JSON.stringify({ 
             success: false, 
