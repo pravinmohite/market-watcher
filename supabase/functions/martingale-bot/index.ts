@@ -1259,9 +1259,10 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
           status: 'open', nifty_spot: optionData.niftySpot,
         });
 
-        const modeLabel = isActual ? '🔴' : '📝';
-        actionTaken = `${modeLabel} 🔄 Round ${newRound}: Lost ${pnlPercent.toFixed(1)}%. Flipped to ${newLots} lots ${newStrike} ${newOptionType} @ ₹${newPrice}`;
-      }
+          const modeLabel = isActual ? '🔴' : '📝';
+          actionTaken = `${modeLabel} 🔄 Round ${newRound}: Lost ${pnlPercent.toFixed(1)}%. Flipped to ${newLots} lots ${newStrike} ${newOptionType} @ ₹${newPrice}`;
+        } // end proceed with next round
+      } // end sideways gate else
 
       await sendTelegram(`📊 *Martingale Bot*\n\n${actionTaken}`);
     }
