@@ -1138,12 +1138,11 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
     const pnlAmount = checkPnlAmount;
     let actionTaken = `Monitoring: ${openTrade.option_type} ${openTrade.strike_price} @ ₹${currentPrice} (${pnlPercent.toFixed(2)}%)`;
 
-    // ========== MID-SESSION REFINED DECAY CHECK ==========
-    // Priority: 1) Strong trend → ignore  2) Round < 2 → skip  3) Both ≥2% decline + range-bound → exit
+    // ========== MID-SESSION DECAY CHECK ==========
     {
-      const decayPause = await isInDecayPause(supabase, supabaseUrl, anonKey);
+      const decayPause = await isInDecayPause(supabase);
       if (!decayPause.paused) {
-        const decayResult = await checkAndHandleDoubleDecay(supabase, supabaseUrl, anonKey, openTrade.round);
+        const decayResult = await checkAndHandleDoubleDecay(supabase, supabaseUrl, anonKey);
         if (decayResult.decayDetected) {
           // Square off the current trade immediately
           if (isActual) {
@@ -1168,12 +1167,12 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
           }).eq('id', activeSession.id);
 
           const modeLabel = isActual ? '🔴' : '📝';
-          const msg = `${modeLabel} ⚠️ *Refined Decay — Mid-Session Exit*\nR${openTrade.round} ${openTrade.option_type} ${openTrade.strike_price} @ ₹${currentPrice} (P&L: ₹${pnlAmount.toFixed(0)})\n${decayResult.message}\nWaiting for breakout (max 30 min).`;
+          const msg = `${modeLabel} ⚠️ *Double Decay — Mid-Session Exit*\nR${openTrade.round} ${openTrade.option_type} ${openTrade.strike_price} @ ₹${currentPrice} (P&L: ₹${pnlAmount.toFixed(0)})\n${decayResult.message}`;
           await sendTelegram(msg);
 
           return {
             success: true,
-            action: `⚠️ Decay exit R${openTrade.round} ${openTrade.option_type} @ ₹${currentPrice} (₹${pnlAmount.toFixed(0)}). Waiting for breakout.`,
+            action: `⚠️ Decay exit R${openTrade.round} ${openTrade.option_type} @ ₹${currentPrice} (₹${pnlAmount.toFixed(0)}). Paused 15 min.`,
           };
         }
       } else {
