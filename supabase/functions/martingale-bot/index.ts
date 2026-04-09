@@ -741,7 +741,7 @@ serve(async (req) => {
       // Double decay check before starting (unless skipped by manual override)
       if (!skipDecayCheck) {
         // Check if currently in a decay pause
-        const decayPause = await isInDecayPause(supabase);
+        const decayPause = await isInDecayPause(supabase, supabaseUrl, anonKey);
         if (decayPause.paused) {
           return new Response(JSON.stringify({ 
             success: false, 
@@ -925,7 +925,7 @@ serve(async (req) => {
            (!isExpiryDay && schedTime >= AUTO_START_2 && schedTime < AUTO_START_2 + 1))) {
         if (!existingSession) {
           // Check for double decay before auto-starting
-          const decayPause = await isInDecayPause(supabase);
+          const decayPause = await isInDecayPause(supabase, supabaseUrl, anonKey);
           let shouldStart = true;
 
           if (decayPause.paused) {
@@ -1078,7 +1078,7 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
       .maybeSingle();
 
     if (!activeCheck) {
-      const decayPause = await isInDecayPause(supabase);
+      const decayPause = await isInDecayPause(supabase, supabaseUrl, anonKey);
       if (decayPause.paused) {
         return { success: true, message: `⚠️ Double decay pause: ${decayPause.remainingMins} min remaining. Both CE & PE premiums declining.` };
       }
@@ -1247,7 +1247,7 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
     // Continuously check if both CE & PE premiums are declining.
     // If so, square off current trade immediately and pause for 15 mins.
     {
-      const decayPause = await isInDecayPause(supabase);
+      const decayPause = await isInDecayPause(supabase, supabaseUrl, anonKey);
       if (!decayPause.paused) {
         // Only check every tick (not during an existing pause)
         const decayResult = await checkAndHandleDoubleDecay(supabase, supabaseUrl, anonKey);
