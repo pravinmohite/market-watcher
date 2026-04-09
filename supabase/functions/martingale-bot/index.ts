@@ -18,6 +18,7 @@ const PAUSE_DURATION_MS = 10 * 60 * 1000;
 const SIDEWAYS_PAUSE_DURATION_MS = 15 * 60 * 1000; // 15 min pause after sideways skip
 const SIDEWAYS_MIN_ROUND = 3; // Only gate entry from R3 onwards
 const SIDEWAYS_NIFTY_RANGE_THRESHOLD = 50; // Nifty range < 50pts in last 15min = sideways
+const SIDEWAYS_PREMIUM_DECLINE_RATIO = 0.97; // Both premiums down >3% from R1 = decay
 
 async function getDailyPnl(supabase: any): Promise<number> {
   const nowIST = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
@@ -295,6 +296,8 @@ async function shouldSkipNextRound(
   niftySpot: number,
   supabaseUrl: string,
   anonKey: string,
+  currentCEPrice?: number,
+  currentPEPrice?: number,
 ): Promise<{ skip: boolean; reason: string }> {
   // R1 and R2 — always allow, early losses are normal
   if (nextRound < SIDEWAYS_MIN_ROUND) {
@@ -304,7 +307,7 @@ async function shouldSkipNextRound(
   // Check if last 2 rounds in this session were both losses
   const { data: recentTrades } = await supabase
     .from('martingale_trades')
-    .select('round, pnl, status')
+    .select('round, pnl, status, nifty_spot')
     .eq('session_id', sessionId)
     .eq('status', 'closed')
     .order('round', { ascending: false })
@@ -319,16 +322,12 @@ async function shouldSkipNextRound(
     return { skip: false, reason: `R${nextRound}: last 2 rounds not both losses — proceed` };
   }
 
-  // Both were losses — now check if market is sideways
-  // Use Nifty spot range from recent trades vs current spot
-  const tradeSpots = recentTrades
-    .map((t: any) => t.nifty_spot)
-    .filter((s: any) => s && s > 0);
-  
-  // Also get the oldest trade's nifty spot for a wider range check
+  // Both were losses — now check TWO signals (either one triggers skip)
+
+  // Signal 1: Nifty range-bound (market going nowhere)
   const { data: allSessionTrades } = await supabase
     .from('martingale_trades')
-    .select('nifty_spot, entry_time')
+    .select('nifty_spot, entry_price, option_type, round, entry_time')
     .eq('session_id', sessionId)
     .order('entry_time', { ascending: true });
 
@@ -338,20 +337,48 @@ async function shouldSkipNextRound(
       .map((t: any) => Number(t.nifty_spot))
       .filter((s: number) => s > 0);
     if (spots.length > 0) {
-      spots.push(niftySpot); // include current
+      spots.push(niftySpot);
       niftyRange = Math.max(...spots) - Math.min(...spots);
     }
   }
 
-  if (niftyRange >= SIDEWAYS_NIFTY_RANGE_THRESHOLD) {
-    return { skip: false, reason: `R${nextRound}: last 2 losses but Nifty range ${niftyRange.toFixed(0)}pts ≥ ${SIDEWAYS_NIFTY_RANGE_THRESHOLD}pts — market moving, proceed` };
+  const marketSideways = niftyRange < SIDEWAYS_NIFTY_RANGE_THRESHOLD;
+
+  // Signal 2: Both premiums decaying from R1 anchor (catches IV crush days)
+  let bothDecaying = false;
+  let decayDetail = '';
+  if (currentCEPrice && currentPEPrice && allSessionTrades && allSessionTrades.length > 0) {
+    // Find R1 entry price as the premium anchor
+    const r1CE = allSessionTrades.find((t: any) => t.round === 1 && t.option_type === 'CE');
+    const r1PE = allSessionTrades.find((t: any) => t.round === 1 && t.option_type === 'PE');
+    
+    // Use R1 entry prices if available, otherwise use earliest trade of each type
+    const anchorCE = r1CE ? Number(r1CE.entry_price) : null;
+    const anchorPE = r1PE ? Number(r1PE.entry_price) : null;
+
+    if (anchorCE && anchorPE && anchorCE > 0 && anchorPE > 0) {
+      const ceRatio = currentCEPrice / anchorCE;
+      const peRatio = currentPEPrice / anchorPE;
+      bothDecaying = ceRatio < SIDEWAYS_PREMIUM_DECLINE_RATIO && peRatio < SIDEWAYS_PREMIUM_DECLINE_RATIO;
+      decayDetail = `CE: ₹${anchorCE.toFixed(0)}→₹${currentCEPrice.toFixed(0)} (${((1 - ceRatio) * 100).toFixed(1)}% down), PE: ₹${anchorPE.toFixed(0)}→₹${currentPEPrice.toFixed(0)} (${((1 - peRatio) * 100).toFixed(1)}% down)`;
+    }
   }
 
-  // Both conditions met: consecutive losses + sideways market
-  return { 
-    skip: true, 
-    reason: `R${nextRound}: last 2 rounds both losses + Nifty range only ${niftyRange.toFixed(0)}pts (< ${SIDEWAYS_NIFTY_RANGE_THRESHOLD}pts). Sideways trap detected.`,
-  };
+  if (marketSideways) {
+    return { 
+      skip: true, 
+      reason: `R${nextRound}: last 2 rounds both losses + Nifty range only ${niftyRange.toFixed(0)}pts (< ${SIDEWAYS_NIFTY_RANGE_THRESHOLD}pts). Sideways trap detected.`,
+    };
+  }
+
+  if (bothDecaying) {
+    return {
+      skip: true,
+      reason: `R${nextRound}: last 2 rounds both losses + both premiums decaying from R1. ${decayDetail}. IV crush / theta trap detected.`,
+    };
+  }
+
+  return { skip: false, reason: `R${nextRound}: last 2 losses but market moving (range ${niftyRange.toFixed(0)}pts) and premiums not both decaying — proceed` };
 }
 
 // Check if currently in a sideways pause period
@@ -1188,6 +1215,7 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
 
         const sidewaysCheck = await shouldSkipNextRound(
           supabase, activeSession.id, newRound, optionData.niftySpot, supabaseUrl, anonKey,
+          optionData.otmCEPrice, optionData.otmPEPrice,
         );
 
         if (sidewaysCheck.skip) {
