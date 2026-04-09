@@ -557,13 +557,8 @@ serve(async (req) => {
         }
       }
 
-      // Clear decay state on manual stop
-      await Promise.all([
-        supabase.from('bot_settings').delete().eq('key', 'decay_pause_until'),
-        supabase.from('bot_settings').delete().eq('key', 'decay_ce_price'),
-        supabase.from('bot_settings').delete().eq('key', 'decay_pe_price'),
-        supabase.from('bot_settings').delete().eq('key', 'decay_check_time'),
-      ]);
+      // Clear sideways pause on manual stop
+      await supabase.from('bot_settings').delete().eq('key', 'sideways_pause_until');
 
       return new Response(JSON.stringify({ success: true, message: 'Bot stopped' }), {
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
