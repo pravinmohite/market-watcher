@@ -433,6 +433,165 @@ async function getDecayStatus(supabase: any): Promise<any> {
   };
 }
 
+async function continueSessionFromLastLoss(
+  supabase: any,
+  supabaseUrl: string,
+  anonKey: string,
+  session: any,
+  lastLossTrade: any,
+  tradingMode: string,
+): Promise<{ success: boolean; action?: string; message?: string; telegramText?: string }> {
+  const isActual = tradingMode === 'actual';
+  const modeLabel = isActual ? '🔴' : '📝';
+  const lastLossRound = Number(lastLossTrade?.round) || Number(session.current_round) || 1;
+  const maxRounds = Number(session.max_rounds) || DEFAULT_MAX_ROUNDS;
+
+  const { data: existingOpenTrade } = await supabase
+    .from('martingale_trades')
+    .select('id, round')
+    .eq('session_id', session.id)
+    .eq('status', 'open')
+    .maybeSingle();
+
+  if (existingOpenTrade) {
+    return {
+      success: true,
+      message: `Round ${existingOpenTrade.round} is already open for this session`,
+    };
+  }
+
+  const { data: closedTrades } = await supabase
+    .from('martingale_trades')
+    .select('pnl')
+    .eq('session_id', session.id)
+    .eq('status', 'closed');
+
+  const sessionTotalPnl = (closedTrades || []).reduce(
+    (sum: number, trade: any) => sum + (Number(trade.pnl) || 0),
+    0,
+  );
+
+  const newRound = lastLossRound + 1;
+  if (newRound > maxRounds) {
+    const action = `${modeLabel} ⛔ MAX ROUNDS (${maxRounds}) reached. Session P&L: ₹${sessionTotalPnl.toFixed(0)}. Bot stopped — manual restart required.`;
+
+    await supabase.from('martingale_sessions').update({
+      status: 'max_rounds_reached',
+      total_pnl: sessionTotalPnl,
+      completed_at: new Date().toISOString(),
+      current_round: lastLossRound,
+    }).eq('id', session.id);
+
+    return {
+      success: true,
+      action,
+      telegramText: `📊 *Martingale Bot*\n\n${action}`,
+    };
+  }
+
+  const { optionData } = await fetchNiftyOptionChain(supabaseUrl, anonKey);
+  if (!optionData) {
+    return { success: false, message: `Could not fetch new option data for round ${newRound}` };
+  }
+
+  const sidewaysCheck = await shouldSkipNextRound(
+    supabase,
+    session.id,
+    newRound,
+    optionData.niftySpot,
+    supabaseUrl,
+    anonKey,
+    optionData.otmCEPrice,
+    optionData.otmPEPrice,
+  );
+
+  if (sidewaysCheck.skip) {
+    await supabase.from('martingale_sessions').update({
+      status: 'sideways_skipped',
+      total_pnl: sessionTotalPnl,
+      completed_at: new Date().toISOString(),
+      current_round: newRound - 1,
+    }).eq('id', session.id);
+
+    const pauseUntil = await setSidewaysPause(supabase);
+    const action = `⚠️ Sideways skip at R${newRound}. ${sidewaysCheck.reason}. Paused 15 min → fresh R1.`;
+
+    return {
+      success: true,
+      action,
+      telegramText: `${modeLabel} ⚠️ *Sideways Trap Detected at R${newRound}*\n\n${sidewaysCheck.reason}\n\n⏸️ Session ended. Pausing 15 min until ${new Date(pauseUntil).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })} IST.\nNext start will be fresh R1 with base lots.`,
+    };
+  }
+
+  const newOptionType = lastLossTrade.option_type === 'CE' ? 'PE' : 'CE';
+  const newLots = Math.pow(2, newRound - 1);
+  const newStrike = newOptionType === 'CE' ? optionData.otmCEStrike : optionData.otmPEStrike;
+  const newPrice = newOptionType === 'CE' ? optionData.otmCEPrice : optionData.otmPEPrice;
+  const newInstrKey = newOptionType === 'CE' ? optionData.otmCEInstrumentKey : optionData.otmPEInstrumentKey;
+
+  if (newPrice <= 0) {
+    return { success: false, message: `Cannot enter round ${newRound}: option price is ₹0` };
+  }
+
+  let actualRoundPrice = newPrice;
+  if (isActual) {
+    const accessToken = await getUpstoxToken(supabase);
+    if (accessToken && newInstrKey) {
+      const buyResult = await placeBuyWithRetry(supabase, accessToken, {
+        instrumentKey: newInstrKey,
+        quantity: newLots * LOT_SIZE,
+        price: newPrice,
+      });
+
+      if (!buyResult.success) {
+        await pauseBotWithNotification(
+          supabase,
+          session.id,
+          `Round ${newRound} BUY for ${newLots} lots ${newStrike} ${newOptionType} @ ₹${newPrice} failed after 3 attempts.`,
+        );
+
+        await supabase.from('martingale_sessions').update({
+          current_round: newRound,
+          total_pnl: sessionTotalPnl,
+        }).eq('id', session.id);
+
+        return {
+          success: false,
+          message: `Round ${newRound} order not filled after 3 attempts. Bot paused for 10 minutes.`,
+        };
+      }
+
+      actualRoundPrice = buyResult.filledPrice;
+    } else {
+      return { success: false, message: 'Cannot place buy order: missing Upstox token or instrument key' };
+    }
+  }
+
+  await supabase.from('martingale_sessions').update({
+    status: 'active',
+    current_round: newRound,
+    total_pnl: sessionTotalPnl,
+  }).eq('id', session.id);
+
+  await supabase.from('martingale_trades').insert({
+    session_id: session.id,
+    round: newRound,
+    option_type: newOptionType,
+    strike_price: newStrike,
+    lots: newLots,
+    entry_price: actualRoundPrice,
+    status: 'open',
+    nifty_spot: optionData.niftySpot,
+  });
+
+  const action = `${modeLabel} 🔄 Round ${newRound}: Resumed from last loss. Flipped to ${newLots} lots ${newStrike} ${newOptionType} @ ₹${actualRoundPrice.toFixed(2)}`;
+  return {
+    success: true,
+    action,
+    telegramText: `📊 *Martingale Bot*\n\n${action}`,
+  };
+}
+
 serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
@@ -976,7 +1135,37 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
       .maybeSingle();
 
     if (!openTrade) {
-      return { success: true, message: 'No open trade in active session' };
+      const { data: lastClosedTrade } = await supabase
+        .from('martingale_trades')
+        .select('*')
+        .eq('session_id', activeSession.id)
+        .eq('status', 'closed')
+        .order('round', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (!lastClosedTrade || (Number(lastClosedTrade.pnl) || 0) >= 0) {
+        return { success: true, message: 'No open trade in active session' };
+      }
+
+      const resumeResult = await continueSessionFromLastLoss(
+        supabase,
+        supabaseUrl,
+        anonKey,
+        activeSession,
+        lastClosedTrade,
+        tradingMode,
+      );
+
+      if (resumeResult.telegramText) {
+        await sendTelegram(resumeResult.telegramText);
+      }
+
+      return {
+        success: resumeResult.success,
+        action: resumeResult.action,
+        message: resumeResult.message || resumeResult.action || 'Recovered session from last loss',
+      };
     }
 
     // Check 3:25 PM auto square off
@@ -1194,93 +1383,23 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
         }
       }
 
-      const newRound = activeSession.current_round + 1;
-      const newTotalPnl = activeSession.total_pnl + pnlAmount;
-      const newOptionType = openTrade.option_type === 'CE' ? 'PE' : 'CE';
-      const newLots = Math.pow(2, newRound - 1);
+      const recoveryResult = await continueSessionFromLastLoss(
+        supabase,
+        supabaseUrl,
+        anonKey,
+        activeSession,
+        { ...openTrade, pnl: pnlAmount },
+        tradingMode,
+      );
 
-      if (newRound > activeSession.max_rounds) {
-        await supabase.from('martingale_sessions').update({
-          status: 'max_rounds_reached', total_pnl: newTotalPnl,
-          completed_at: new Date().toISOString(), current_round: newRound - 1,
-        }).eq('id', activeSession.id);
+      if (!recoveryResult.success) {
+        return { success: false, message: recoveryResult.message || 'Could not continue from last loss' };
+      }
 
-        const modeLabel = isActual ? '🔴' : '📝';
-        actionTaken = `${modeLabel} ⛔ MAX ROUNDS (${activeSession.max_rounds}) reached. Session P&L: ₹${newTotalPnl.toFixed(0)}. Bot stopped — manual restart required.`;
-        await sendTelegram(`📊 *Martingale Bot*\n\n${actionTaken}`);
-      } else {
-        // ========== BETWEEN-ROUND SIDEWAYS GATE (R3+) ==========
-        const { optionData } = await fetchNiftyOptionChain(supabaseUrl, anonKey);
-        if (!optionData) {
-          return { success: false, message: 'Could not fetch new option data for next round' };
-        }
-
-        const sidewaysCheck = await shouldSkipNextRound(
-          supabase, activeSession.id, newRound, optionData.niftySpot, supabaseUrl, anonKey,
-          optionData.otmCEPrice, optionData.otmPEPrice,
-        );
-
-        if (sidewaysCheck.skip) {
-          // End session, set pause, reset to R1 on next start
-          await supabase.from('martingale_sessions').update({
-            status: 'sideways_skipped', total_pnl: newTotalPnl, completed_at: new Date().toISOString(),
-            current_round: newRound - 1,
-          }).eq('id', activeSession.id);
-
-          const pauseUntil = await setSidewaysPause(supabase);
-
-          const modeLabel = isActual ? '🔴' : '📝';
-          const msg = `${modeLabel} ⚠️ *Sideways Trap Detected at R${newRound}*\n\n${sidewaysCheck.reason}\n\n⏸️ Session ended. Pausing 15 min until ${new Date(pauseUntil).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })} IST.\nNext start will be fresh R1 with base lots.`;
-          await sendTelegram(msg);
-
-          actionTaken = `⚠️ Sideways skip at R${newRound}. ${sidewaysCheck.reason}. Paused 15 min → fresh R1.`;
-          await sendTelegram(`📊 *Martingale Bot*\n\n${actionTaken}`);
-        } else {
-          // ========== PROCEED WITH NEXT ROUND ==========
-
-        const newStrike = newOptionType === 'CE' ? optionData.otmCEStrike : optionData.otmPEStrike;
-        const newPrice = newOptionType === 'CE' ? optionData.otmCEPrice : optionData.otmPEPrice;
-        const newInstrKey = newOptionType === 'CE' ? optionData.otmCEInstrumentKey : optionData.otmPEInstrumentKey;
-
-        if (newPrice <= 0) {
-          return { success: false, message: `Cannot enter round ${newRound}: option price is ₹0` };
-        }
-
-        let actualRoundPrice = newPrice;
-        if (isActual) {
-          const accessToken = await getUpstoxToken(supabase);
-          if (accessToken && newInstrKey) {
-            const buyResult = await placeBuyWithRetry(supabase, accessToken, {
-              instrumentKey: newInstrKey,
-              quantity: newLots * LOT_SIZE,
-              price: newPrice,
-            });
-            if (!buyResult.success) {
-              await pauseBotWithNotification(supabase, activeSession.id,
-                `Round ${newRound} BUY for ${newLots} lots ${newStrike} ${newOptionType} @ ₹${newPrice} failed after 3 attempts.`);
-              await supabase.from('martingale_sessions').update({
-                current_round: newRound, total_pnl: newTotalPnl,
-              }).eq('id', activeSession.id);
-              return { success: false, message: `Round ${newRound} order not filled after 3 attempts. Bot paused for 10 minutes.` };
-            }
-            actualRoundPrice = buyResult.filledPrice;
-          }
-        }
-
-        await supabase.from('martingale_sessions').update({
-          current_round: newRound, total_pnl: newTotalPnl,
-        }).eq('id', activeSession.id);
-
-        await supabase.from('martingale_trades').insert({
-          session_id: activeSession.id, round: newRound, option_type: newOptionType,
-          strike_price: newStrike, lots: newLots, entry_price: actualRoundPrice,
-          status: 'open', nifty_spot: optionData.niftySpot,
-        });
-
-          const modeLabel = isActual ? '🔴' : '📝';
-          actionTaken = `${modeLabel} 🔄 Round ${newRound}: Lost ${pnlPercent.toFixed(1)}%. Flipped to ${newLots} lots ${newStrike} ${newOptionType} @ ₹${newPrice}`;
-        } // end proceed with next round
-      } // end sideways gate else
+      actionTaken = recoveryResult.action || actionTaken;
+      if (recoveryResult.telegramText) {
+        await sendTelegram(recoveryResult.telegramText);
+      }
 
       await sendTelegram(`📊 *Martingale Bot*\n\n${actionTaken}`);
     }
