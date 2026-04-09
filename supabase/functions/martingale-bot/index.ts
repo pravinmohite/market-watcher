@@ -773,20 +773,13 @@ serve(async (req) => {
           ((schedTime >= AUTO_START_1 && schedTime < AUTO_START_1 + 1) ||
            (!isExpiryDay && schedTime >= AUTO_START_2 && schedTime < AUTO_START_2 + 1))) {
         if (!existingSession) {
-          // Check for double decay before auto-starting
-          const decayPause = await isInDecayPause(supabase);
+          // Check for sideways pause before auto-starting
+          const sidewaysPause = await isInSidewaysPause(supabase);
           let shouldStart = true;
 
-          if (decayPause.paused) {
+          if (sidewaysPause.paused) {
             shouldStart = false;
-            tickResults.push(`⚠️ Double decay pause active. Skipping auto-start. ${decayPause.remainingMins} min remaining.`);
-          } else {
-            // Run decay check
-            const decayResult = await checkAndHandleDoubleDecay(supabase, supabaseUrl, anonKey);
-            if (decayResult.decayDetected) {
-              shouldStart = false;
-              tickResults.push(`⚠️ ${decayResult.message}`);
-            }
+            tickResults.push(`⚠️ Sideways pause active. Skipping auto-start. ${sidewaysPause.remainingMins} min remaining.`);
           }
 
           if (shouldStart) {
