@@ -389,6 +389,61 @@ async function getDecayStatus(supabase: any): Promise<{ active: boolean; ce_prev
     remaining_mins: isActive ? Math.ceil((pauseUntil! - Date.now()) / 60000) : undefined,
   };
 }
+// ========== CONSECUTIVE LOSS DECAY DETECTION ==========
+// Detects double decay by checking if all recent trades in a session lost,
+// alternating between CE and PE. This catches the scenario where snapshot-based
+// detection fails because premiums oscillate momentarily but trend down overall.
+// Example: R1 CE lost, R2 PE lost → both directions losing = double decay.
+const CONSECUTIVE_LOSS_THRESHOLD = 2; // Trigger after 2 consecutive alternating losses
+
+async function checkConsecutiveLossDecay(
+  supabase: any, sessionId: string
+): Promise<{ decayDetected: boolean; message: string }> {
+  // Get all closed trades in the current session, ordered by round
+  const { data: closedTrades } = await supabase
+    .from('martingale_trades')
+    .select('round, option_type, pnl')
+    .eq('session_id', sessionId)
+    .eq('status', 'closed')
+    .order('round', { ascending: true });
+
+  if (!closedTrades || closedTrades.length < CONSECUTIVE_LOSS_THRESHOLD) {
+    return { decayDetected: false, message: 'Not enough trades to evaluate' };
+  }
+
+  // Check last N trades: all must be losses AND alternate CE/PE
+  const recentTrades = closedTrades.slice(-CONSECUTIVE_LOSS_THRESHOLD);
+  const allLosses = recentTrades.every((t: any) => (Number(t.pnl) || 0) < 0);
+  
+  if (!allLosses) {
+    return { decayDetected: false, message: 'Not all recent trades are losses' };
+  }
+
+  // Check if directions alternate (CE→PE or PE→CE)
+  let alternating = true;
+  for (let i = 1; i < recentTrades.length; i++) {
+    if (recentTrades[i].option_type === recentTrades[i - 1].option_type) {
+      alternating = false;
+      break;
+    }
+  }
+
+  if (!alternating) {
+    return { decayDetected: false, message: 'Losses are not in alternating directions' };
+  }
+
+  // Double decay confirmed: both CE and PE lost in consecutive alternating trades
+  const tradesSummary = recentTrades.map((t: any) =>
+    `R${t.round} ${t.option_type} ₹${Number(t.pnl).toFixed(0)}`
+  ).join(', ');
+
+  return {
+    decayDetected: true,
+    message: `Consecutive loss decay: ${tradesSummary}. Both CE & PE directions losing — theta trap detected.`,
+  };
+}
+// ========== END CONSECUTIVE LOSS DECAY DETECTION ==========
+
 // ========== END DOUBLE DECAY DETECTION ==========
 
 serve(async (req) => {
