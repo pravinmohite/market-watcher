@@ -438,7 +438,7 @@ const Martingale = () => {
                 isActive ? "bg-gain animate-pulse" : isPaused ? "bg-yellow-500 animate-pulse" : "bg-muted-foreground"
               )} />
               <span className="text-xs md:text-sm font-medium text-foreground">
-                {isActive ? "Bot Running" : isPaused ? "Bot Paused (resuming in ~10 min)" : "Bot Stopped"}
+                {isActive ? "Bot Running" : isPaused ? "Bot Paused" : "Bot Stopped"}
               </span>
               {isActive && activeSession && (
                 <span className="text-[10px] md:text-xs text-muted-foreground">
