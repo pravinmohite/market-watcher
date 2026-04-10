@@ -784,7 +784,18 @@ serve(async (req) => {
       });
     }
 
-    if (action === 'start') {
+    if (action === 'force_stop_all') {
+      // Bulk stop all active/paused sessions without P&L calculation (for cleanup)
+      await supabase.from('martingale_trades').update({ status: 'closed', exit_time: new Date().toISOString() }).eq('status', 'open');
+      await supabase.from('martingale_sessions').update({ status: 'stopped', completed_at: new Date().toISOString() }).eq('status', 'active');
+      await supabase.from('martingale_sessions').update({ status: 'stopped', completed_at: new Date().toISOString() }).eq('status', 'paused');
+      await supabase.from('bot_settings').delete().eq('key', 'sideways_pause_until');
+      await supabase.from('bot_settings').delete().eq('key', 'pause_until');
+      return new Response(JSON.stringify({ success: true, message: 'Force stopped all sessions' }), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+
       const tradingMode = body.trading_mode || 'paper';
       const maxRounds = Math.min(Math.max(parseInt(body.max_rounds) || DEFAULT_MAX_ROUNDS, 1), 10);
       const skipDecayCheck = body.skip_decay_check === true; // Allow manual override
