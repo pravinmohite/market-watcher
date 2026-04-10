@@ -1166,6 +1166,36 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
             return { success: true, message: `Daily loss limit breached (₹${dailyPnl.toFixed(0)}). Not auto-restarting after sideways pause.` };
           }
 
+          // RECHECK: Fetch fresh market data and verify sideways conditions have cleared
+          const optionData = await fetchNiftyOptionChain(supabaseUrl, anonKey);
+          if (optionData && optionData.niftySpot > 0) {
+            const cePrice = optionData.otmCEPrice || 0;
+            const pePrice = optionData.otmPEPrice || 0;
+
+            // Get stored decay anchors from the session that triggered the pause
+            const { data: decayCE } = await supabase.from('bot_settings').select('value').eq('key', 'decay_ce_price').maybeSingle();
+            const { data: decayPE } = await supabase.from('bot_settings').select('value').eq('key', 'decay_pe_price').maybeSingle();
+            const anchorCE = decayCE ? parseFloat(decayCE.value) : 0;
+            const anchorPE = decayPE ? parseFloat(decayPE.value) : 0;
+
+            // Check if premiums are still decaying from the original anchors
+            let stillDecaying = false;
+            if (anchorCE > 0 && anchorPE > 0 && cePrice > 0 && pePrice > 0) {
+              const ceRatio = cePrice / anchorCE;
+              const peRatio = pePrice / anchorPE;
+              stillDecaying = ceRatio < SIDEWAYS_PREMIUM_DECLINE_RATIO && peRatio < SIDEWAYS_PREMIUM_DECLINE_RATIO;
+            }
+
+            // Check Nifty spot range — compare with last known spots from bot_settings
+            // If premiums are still both decaying, re-pause
+            if (stillDecaying) {
+              const newPauseUntil = await setSidewaysPause(supabase);
+              await sendTelegram(`⚠️ *Sideways recheck failed*\nPremiums still decaying: CE ₹${cePrice.toFixed(1)} (anchor ₹${anchorCE.toFixed(1)}), PE ₹${pePrice.toFixed(1)} (anchor ₹${anchorPE.toFixed(1)})\nRe-pausing for 15 min until ${new Date(newPauseUntil).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata' })} IST`);
+              return { success: true, message: `⚠️ Sideways recheck: still decaying. Re-paused for 15 min.` };
+            }
+          }
+
+          // Market has moved — proceed with auto-start
           const { data: settings } = await supabase.from('bot_settings').select('key, value');
           let savedMode = 'paper';
           let savedMaxRounds = DEFAULT_MAX_ROUNDS;
@@ -1182,7 +1212,7 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
             body: JSON.stringify({ action: 'start', trading_mode: savedMode, max_rounds: savedMaxRounds }),
           });
           const startData = await startRes.json();
-          await sendTelegram(`▶️ *Bot Resumed after sideways pause*\n${startData.message || 'Restarted as fresh R1'}`);
+          await sendTelegram(`▶️ *Bot Resumed after sideways pause*\nMarket movement confirmed — restarting as fresh R1`);
           return { success: true, action: `▶️ Resumed after sideways pause: ${startData.message || 'restarted'}` };
         }
       }
