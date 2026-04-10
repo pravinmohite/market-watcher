@@ -1374,11 +1374,40 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
       return { success: true, message: 'No active session' };
     }
 
-    const { data: activeSession } = await supabase
+    // Get ALL active sessions, keep latest, close duplicates
+    const { data: allActiveSessions } = await supabase
       .from('martingale_sessions')
       .select('*')
       .eq('status', 'active')
-      .maybeSingle();
+      .order('created_at', { ascending: false });
+
+    let activeSession = null;
+    if (allActiveSessions && allActiveSessions.length > 0) {
+      activeSession = allActiveSessions[0]; // Keep the latest
+      // Close any duplicates
+      if (allActiveSessions.length > 1) {
+        console.log(`⚠️ Found ${allActiveSessions.length} active sessions — cleaning up duplicates`);
+        for (let i = 1; i < allActiveSessions.length; i++) {
+          const dup = allActiveSessions[i];
+          // Close any open trades on the duplicate
+          const { data: dupTrades } = await supabase
+            .from('martingale_trades')
+            .select('id')
+            .eq('session_id', dup.id)
+            .eq('status', 'open');
+          if (dupTrades) {
+            for (const t of dupTrades) {
+              await supabase.from('martingale_trades').update({
+                status: 'closed', exit_time: new Date().toISOString(),
+              }).eq('id', t.id);
+            }
+          }
+          await supabase.from('martingale_sessions').update({
+            status: 'completed', completed_at: new Date().toISOString(),
+          }).eq('id', dup.id);
+        }
+      }
+    }
 
     if (!activeSession) {
       return { success: true, message: 'No active session' };
