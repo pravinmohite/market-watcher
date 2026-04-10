@@ -155,7 +155,10 @@ const Martingale = () => {
       return data;
     },
     onSuccess: (data) => {
-      toast.info(data.action || data.message || "Tick complete");
+      const msg = data.action || data.message || "Tick complete";
+      if (!msg.startsWith('Outside')) {
+        toast.info(msg);
+      }
       queryClient.invalidateQueries({ queryKey: ["martingale-status"] });
     },
     onError: () => toast.error("Tick failed"),
