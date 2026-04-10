@@ -17,7 +17,8 @@ const ORDER_FILL_MAX_CHECKS = 3;
 const PAUSE_DURATION_MS = 10 * 60 * 1000;
 const SIDEWAYS_PAUSE_DURATION_MS = 15 * 60 * 1000; // 15 min pause after sideways skip
 const SIDEWAYS_MIN_ROUND = 3; // Only gate entry from R3 onwards
-const SIDEWAYS_NIFTY_RANGE_THRESHOLD = 50; // Nifty range < 50pts in last 15min = sideways
+const SIDEWAYS_NIFTY_RANGE_THRESHOLD = 50; // Nifty range < 50pts in session = sideways (initial gate)
+const SIDEWAYS_RECHECK_THRESHOLD = 30; // Nifty must move 30pts from pause spot to resume
 const SIDEWAYS_PREMIUM_DECLINE_RATIO = 0.97; // Both premiums down >3% from R1 = decay
 
 async function getDailyPnl(supabase: any): Promise<number> {
@@ -1180,14 +1181,14 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
             // Check Nifty range: if spot hasn't moved enough from pause time, still sideways
             if (pauseSpot > 0) {
               const niftyRange = Math.abs(optionData.niftySpot - pauseSpot);
-              if (niftyRange < SIDEWAYS_NIFTY_RANGE_THRESHOLD) {
+              if (niftyRange < SIDEWAYS_RECHECK_THRESHOLD) {
                 // Update stored spot to current for next recheck cycle
                 await supabase.from('bot_settings').upsert({
                   key: 'sideways_pause_nifty_spot', value: String(optionData.niftySpot), updated_at: new Date().toISOString(),
                 }, { onConflict: 'key' });
                 const newPauseUntil = await setSidewaysPause(supabase);
-                await sendTelegram(`⚠️ *Sideways recheck failed*\nNifty moved only ${niftyRange.toFixed(0)}pts (need ${SIDEWAYS_NIFTY_RANGE_THRESHOLD}pts). Spot: ${optionData.niftySpot} vs pause: ${pauseSpot.toFixed(0)}\nRe-pausing 15 min until ${new Date(newPauseUntil).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata' })} IST`);
-                return { success: true, message: `⚠️ Sideways recheck: Nifty range ${niftyRange.toFixed(0)}pts < ${SIDEWAYS_NIFTY_RANGE_THRESHOLD}pts. Re-paused 15 min.` };
+                await sendTelegram(`⚠️ *Sideways recheck failed*\nNifty moved only ${niftyRange.toFixed(0)}pts (need ${SIDEWAYS_RECHECK_THRESHOLD}pts). Spot: ${optionData.niftySpot} vs pause: ${pauseSpot.toFixed(0)}\nRe-pausing 15 min until ${new Date(newPauseUntil).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata' })} IST`);
+                return { success: true, message: `⚠️ Sideways recheck: Nifty range ${niftyRange.toFixed(0)}pts < ${SIDEWAYS_RECHECK_THRESHOLD}pts. Re-paused 15 min.` };
               }
             }
 
