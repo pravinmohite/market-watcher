@@ -1232,7 +1232,7 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
 
       // Only auto-restart if a sideways pause key existed and just expired (was cleared by isInSidewaysPause)
       if (hadSidewaysPause && !sidewaysPause.paused) {
-        const inMorningWindow = tickTime >= (9 * 60 + 15) && tickTime <= (11 * 60 + 15);
+        const inMorningWindow = tickTime >= (9 * 60 + 25) && tickTime <= (11 * 60 + 15);
         const inAfternoonWindow = tickTime >= (14 * 60 + 30) && tickTime <= (15 * 60 + 25);
         if (inMorningWindow || inAfternoonWindow) {
           const dailyPnl = await getDailyPnl(supabase);
