@@ -1123,44 +1123,53 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
       .maybeSingle();
 
     if (!activeCheck) {
+      // Check sideways_pause_until key BEFORE isInSidewaysPause clears it
+      const { data: rawPauseData } = await supabase
+        .from('bot_settings')
+        .select('value')
+        .eq('key', 'sideways_pause_until')
+        .maybeSingle();
+      
+      const hadSidewaysPause = !!rawPauseData?.value;
       const sidewaysPause = await isInSidewaysPause(supabase);
+      
       if (sidewaysPause.paused) {
         return { success: true, message: `⚠️ Sideways pause: ${sidewaysPause.remainingMins} min remaining. Will restart as fresh R1.` };
       }
 
-      // Sideways pause just expired — auto-start a new session
-      // Check if we're within trading windows before auto-starting
-      const inMorningWindow = tickTime >= (9 * 60 + 15) && tickTime <= (11 * 60 + 15);
-      const inAfternoonWindow = tickTime >= (14 * 60 + 30) && tickTime <= (15 * 60 + 25);
-      if (inMorningWindow || inAfternoonWindow) {
-        // Check daily loss limit before auto-starting
-        const dailyPnl = await getDailyPnl(supabase);
-        const dailyLimit = await getDailyLossLimit(supabase);
-        if (dailyPnl <= -dailyLimit) {
-          return { success: true, message: `Daily loss limit breached (₹${dailyPnl.toFixed(0)}). Not auto-restarting after sideways pause.` };
-        }
-
-        const { data: settings } = await supabase.from('bot_settings').select('key, value');
-        let savedMode = 'paper';
-        let savedMaxRounds = DEFAULT_MAX_ROUNDS;
-        if (settings) {
-          for (const s of settings) {
-            if (s.key === 'trading_mode') savedMode = s.value;
-            if (s.key === 'max_rounds') savedMaxRounds = Math.min(Math.max(parseInt(s.value) || DEFAULT_MAX_ROUNDS, 1), 10);
+      // Only auto-restart if a sideways pause key existed and just expired (was cleared by isInSidewaysPause)
+      if (hadSidewaysPause && !sidewaysPause.paused) {
+        const inMorningWindow = tickTime >= (9 * 60 + 15) && tickTime <= (11 * 60 + 15);
+        const inAfternoonWindow = tickTime >= (14 * 60 + 30) && tickTime <= (15 * 60 + 25);
+        if (inMorningWindow || inAfternoonWindow) {
+          const dailyPnl = await getDailyPnl(supabase);
+          const dailyLimit = await getDailyLossLimit(supabase);
+          if (dailyPnl <= -dailyLimit) {
+            return { success: true, message: `Daily loss limit breached (₹${dailyPnl.toFixed(0)}). Not auto-restarting after sideways pause.` };
           }
-        }
 
-        const startRes = await fetch(`${supabaseUrl}/functions/v1/martingale-bot`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${anonKey}` },
-          body: JSON.stringify({ action: 'start', trading_mode: savedMode, max_rounds: savedMaxRounds }),
-        });
-        const startData = await startRes.json();
-        await sendTelegram(`▶️ *Bot Resumed after sideways pause*\n${startData.message || 'Restarted as fresh R1'}`);
-        return { success: true, action: `▶️ Resumed after sideways pause: ${startData.message || 'restarted'}` };
+          const { data: settings } = await supabase.from('bot_settings').select('key, value');
+          let savedMode = 'paper';
+          let savedMaxRounds = DEFAULT_MAX_ROUNDS;
+          if (settings) {
+            for (const s of settings) {
+              if (s.key === 'trading_mode') savedMode = s.value;
+              if (s.key === 'max_rounds') savedMaxRounds = Math.min(Math.max(parseInt(s.value) || DEFAULT_MAX_ROUNDS, 1), 10);
+            }
+          }
+
+          const startRes = await fetch(`${supabaseUrl}/functions/v1/martingale-bot`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${anonKey}` },
+            body: JSON.stringify({ action: 'start', trading_mode: savedMode, max_rounds: savedMaxRounds }),
+          });
+          const startData = await startRes.json();
+          await sendTelegram(`▶️ *Bot Resumed after sideways pause*\n${startData.message || 'Restarted as fresh R1'}`);
+          return { success: true, action: `▶️ Resumed after sideways pause: ${startData.message || 'restarted'}` };
+        }
       }
 
-      return { success: true, message: 'No active session (outside trading window for auto-restart)' };
+      return { success: true, message: 'No active session' };
     }
 
     const { data: activeSession } = await supabase
