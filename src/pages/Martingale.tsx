@@ -86,7 +86,7 @@ const Martingale = () => {
       const { data: tickData } = await supabase.functions.invoke("martingale-bot", {
         body: { action: "tick", source: "ui" },
       });
-      if (tickData?.action && tickData.action !== lastTickAction && !tickData.action.startsWith('Monitoring') && !tickData.action.startsWith('Skipped') && !tickData.action.startsWith('Outside market hours')) {
+      if (tickData?.action && tickData.action !== lastTickAction && !tickData.action.startsWith('Monitoring') && !tickData.action.startsWith('Skipped') && !tickData.action.startsWith('Outside') && !tickData.message?.startsWith('Outside')) {
         setLastTickAction(tickData.action);
         toast.info(tickData.action);
       }
@@ -155,7 +155,10 @@ const Martingale = () => {
       return data;
     },
     onSuccess: (data) => {
-      toast.info(data.action || data.message || "Tick complete");
+      const msg = data.action || data.message || "Tick complete";
+      if (!msg.startsWith('Outside')) {
+        toast.info(msg);
+      }
       queryClient.invalidateQueries({ queryKey: ["martingale-status"] });
     },
     onError: () => toast.error("Tick failed"),
