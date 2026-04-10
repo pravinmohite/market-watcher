@@ -678,6 +678,17 @@ serve(async (req) => {
       const dailyLossLimit = await getDailyLossLimit(supabase);
       const decayStatus = await getDecayStatus(supabase);
 
+      // Get pause info for UI
+      let pauseInfo: { paused: boolean; pause_until?: string; reason?: string } = { paused: false };
+      if (activeSession?.status === 'paused') {
+        const { data: pauseData } = await supabase.from('bot_settings').select('key, value').in('key', ['pause_until', 'pause_reason']);
+        if (pauseData) {
+          const pauseUntil = pauseData.find((d: any) => d.key === 'pause_until')?.value;
+          const pauseReason = pauseData.find((d: any) => d.key === 'pause_reason')?.value;
+          pauseInfo = { paused: true, pause_until: pauseUntil, reason: pauseReason || 'Order fill failed' };
+        }
+      }
+
       return new Response(JSON.stringify({
         success: true,
         active_session: activeSession,
@@ -690,6 +701,7 @@ serve(async (req) => {
         daily_pnl: dailyPnl,
         daily_loss_limit: dailyLossLimit,
         decay_status: decayStatus,
+        pause_info: pauseInfo,
       }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
     }
 
