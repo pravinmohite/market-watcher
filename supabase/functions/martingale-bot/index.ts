@@ -1536,7 +1536,7 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
     //  Sideways detection now happens between rounds at R3+ entry.)
 
     async function startNewSession(lastOptionType: string, lastPnl: number) {
-      // Check if we're still in a trading window before starting new session
+      // GUARD 1: Check if we're still in a trading window
       const nowCheck = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
       const checkTime = nowCheck.getHours() * 60 + nowCheck.getMinutes();
       const inW1 = checkTime >= (9 * 60 + 25) && checkTime <= (11 * 60 + 15);
@@ -1546,7 +1546,32 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
         return;
       }
 
-      // Check sideways pause before starting new session
+      // GUARD 2: Check no active session already exists (prevents duplicates)
+      const { data: existingActive } = await supabase
+        .from('martingale_sessions')
+        .select('id')
+        .eq('status', 'active')
+        .maybeSingle();
+      if (existingActive) {
+        console.log(`New session skipped: active session ${existingActive.id} already exists`);
+        return;
+      }
+
+      // GUARD 3: Check no session was created in the last 60 seconds
+      const recentCutoff = new Date(Date.now() - 60000).toISOString();
+      const { data: recentSess } = await supabase
+        .from('martingale_sessions')
+        .select('id')
+        .gte('created_at', recentCutoff)
+        .eq('status', 'active')
+        .limit(1)
+        .maybeSingle();
+      if (recentSess) {
+        console.log(`New session skipped: session ${recentSess.id} created within 60s`);
+        return;
+      }
+
+      // GUARD 4: Check sideways pause
       const sidewaysPause = await isInSidewaysPause(supabase);
       if (sidewaysPause.paused) {
         console.log(`New session skipped: sideways pause active (${sidewaysPause.remainingMins} min remaining)`);
@@ -1597,6 +1622,17 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
         }
       }
 
+      // GUARD 5: Final recheck right before insert
+      const { data: finalCheck } = await supabase
+        .from('martingale_sessions')
+        .select('id')
+        .eq('status', 'active')
+        .maybeSingle();
+      if (finalCheck) {
+        console.log(`New session skipped at final guard: active session ${finalCheck.id} exists`);
+        return;
+      }
+
       const { data: newSession } = await supabase
         .from('martingale_sessions')
         .insert({ status: 'active', current_round: 1, max_rounds: activeSession.max_rounds, trading_mode: tradingMode })
@@ -1607,10 +1643,6 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
           strike_price: newStrike, lots: 1,
           entry_price: actualNewPrice, status: 'open', nifty_spot: optionData.niftySpot,
         });
-
-
-
-
         console.log(`New session: ${newDirection} ${newStrike} @ ₹${actualNewPrice} (lastPnl=${lastPnl.toFixed(0)})`);
       }
     }
