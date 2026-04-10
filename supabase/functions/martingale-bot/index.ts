@@ -520,6 +520,10 @@ async function continueSessionFromLastLoss(
     }).eq('id', session.id);
 
     const pauseUntil = await setSidewaysPause(supabase);
+    // Store Nifty spot at pause time for recheck comparison
+    await supabase.from('bot_settings').upsert({
+      key: 'sideways_pause_nifty_spot', value: String(optionData.niftySpot), updated_at: new Date().toISOString(),
+    }, { onConflict: 'key' });
     const action = `⚠️ Sideways skip at R${newRound}. ${sidewaysCheck.reason}. Paused 15 min → fresh R1.`;
 
     return {
@@ -1169,30 +1173,26 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
           // RECHECK: Fetch fresh market data and verify sideways conditions have cleared
           const optionData = await fetchNiftyOptionChain(supabaseUrl, anonKey);
           if (optionData && optionData.niftySpot > 0) {
-            const cePrice = optionData.otmCEPrice || 0;
-            const pePrice = optionData.otmPEPrice || 0;
+            // Get the Nifty spot stored when the pause was first triggered
+            const { data: pauseSpotData } = await supabase.from('bot_settings').select('value').eq('key', 'sideways_pause_nifty_spot').maybeSingle();
+            const pauseSpot = pauseSpotData ? parseFloat(pauseSpotData.value) : 0;
 
-            // Get stored decay anchors from the session that triggered the pause
-            const { data: decayCE } = await supabase.from('bot_settings').select('value').eq('key', 'decay_ce_price').maybeSingle();
-            const { data: decayPE } = await supabase.from('bot_settings').select('value').eq('key', 'decay_pe_price').maybeSingle();
-            const anchorCE = decayCE ? parseFloat(decayCE.value) : 0;
-            const anchorPE = decayPE ? parseFloat(decayPE.value) : 0;
-
-            // Check if premiums are still decaying from the original anchors
-            let stillDecaying = false;
-            if (anchorCE > 0 && anchorPE > 0 && cePrice > 0 && pePrice > 0) {
-              const ceRatio = cePrice / anchorCE;
-              const peRatio = pePrice / anchorPE;
-              stillDecaying = ceRatio < SIDEWAYS_PREMIUM_DECLINE_RATIO && peRatio < SIDEWAYS_PREMIUM_DECLINE_RATIO;
+            // Check Nifty range: if spot hasn't moved enough from pause time, still sideways
+            if (pauseSpot > 0) {
+              const niftyRange = Math.abs(optionData.niftySpot - pauseSpot);
+              if (niftyRange < SIDEWAYS_NIFTY_RANGE_THRESHOLD) {
+                // Update stored spot to current for next recheck cycle
+                await supabase.from('bot_settings').upsert({
+                  key: 'sideways_pause_nifty_spot', value: String(optionData.niftySpot), updated_at: new Date().toISOString(),
+                }, { onConflict: 'key' });
+                const newPauseUntil = await setSidewaysPause(supabase);
+                await sendTelegram(`⚠️ *Sideways recheck failed*\nNifty moved only ${niftyRange.toFixed(0)}pts (need ${SIDEWAYS_NIFTY_RANGE_THRESHOLD}pts). Spot: ${optionData.niftySpot} vs pause: ${pauseSpot.toFixed(0)}\nRe-pausing 15 min until ${new Date(newPauseUntil).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata' })} IST`);
+                return { success: true, message: `⚠️ Sideways recheck: Nifty range ${niftyRange.toFixed(0)}pts < ${SIDEWAYS_NIFTY_RANGE_THRESHOLD}pts. Re-paused 15 min.` };
+              }
             }
 
-            // Check Nifty spot range — compare with last known spots from bot_settings
-            // If premiums are still both decaying, re-pause
-            if (stillDecaying) {
-              const newPauseUntil = await setSidewaysPause(supabase);
-              await sendTelegram(`⚠️ *Sideways recheck failed*\nPremiums still decaying: CE ₹${cePrice.toFixed(1)} (anchor ₹${anchorCE.toFixed(1)}), PE ₹${pePrice.toFixed(1)} (anchor ₹${anchorPE.toFixed(1)})\nRe-pausing for 15 min until ${new Date(newPauseUntil).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata' })} IST`);
-              return { success: true, message: `⚠️ Sideways recheck: still decaying. Re-paused for 15 min.` };
-            }
+            // Clean up pause spot
+            await supabase.from('bot_settings').delete().eq('key', 'sideways_pause_nifty_spot');
           }
 
           // Market has moved — proceed with auto-start
