@@ -175,6 +175,7 @@ const Martingale = () => {
   const dailyPnl = data?.daily_pnl ?? 0;
   const serverDailyLossLimit = data?.daily_loss_limit ?? dailyLossLimit;
   const decayStatus = data?.decay_status;
+  const pauseInfo = data?.pause_info;
 
   // Build session mode lookup
   const sessionModeMap = useMemo(() => {

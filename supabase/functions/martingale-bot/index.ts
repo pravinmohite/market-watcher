@@ -265,6 +265,12 @@ async function pauseBotWithNotification(supabase: any, sessionId: string, reason
     updated_at: new Date().toISOString(),
   }, { onConflict: 'key' });
 
+  await supabase.from('bot_settings').upsert({
+    key: 'pause_reason',
+    value: reason,
+    updated_at: new Date().toISOString(),
+  }, { onConflict: 'key' });
+
   const msg = `⏸️ *Bot Paused for 10 minutes*\n\n${reason}\n\nWill auto-resume at ${new Date(pausedUntil).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })} IST`;
   await sendTelegram(msg);
   console.log(`Bot paused until ${pausedUntil}: ${reason}`);
