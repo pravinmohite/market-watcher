@@ -711,17 +711,8 @@ serve(async (req) => {
       const { data: botRunningData } = await supabase.from('bot_settings').select('value').eq('key', 'bot_running').maybeSingle();
       const botRunning = botRunningData?.value === 'true';
 
-      // If bot is running but outside trading windows and no active session, show watching status
-      if (botRunning && !activeSession && !pauseInfo.paused) {
-        const statusNowIST = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
-        const statusTime = statusNowIST.getHours() * 60 + statusNowIST.getMinutes();
-        const inW1 = statusTime >= (9 * 60 + 25) && statusTime <= (11 * 60 + 15);
-        const inW2 = statusTime >= (14 * 60 + 30) && statusTime <= (15 * 60 + 25);
-        if (!inW1 && !inW2) {
-          const nextWindow = statusTime < (9 * 60 + 25) ? '9:25 AM' : statusTime < (14 * 60 + 30) ? '2:30 PM' : 'tomorrow 9:25 AM';
-          pauseInfo = { paused: true, reason: `Between trading windows — next window: ${nextWindow}` };
-        }
-      }
+      // If bot is running but outside trading windows, don't show pause indicator
+      // Only show pause indicators during trading windows
 
       return new Response(JSON.stringify({
         success: true,
