@@ -435,10 +435,10 @@ const Martingale = () => {
             <div className="flex items-center gap-2">
               <div className={cn(
                 "w-2.5 h-2.5 md:w-3 md:h-3 rounded-full shrink-0",
-                isActive ? "bg-gain animate-pulse" : isPaused ? "bg-yellow-500 animate-pulse" : "bg-muted-foreground"
+                isActive ? "bg-gain animate-pulse" : (isPaused || pauseInfo?.paused) ? "bg-yellow-500 animate-pulse" : "bg-muted-foreground"
               )} />
               <span className="text-xs md:text-sm font-medium text-foreground">
-                {isActive ? "Bot Running" : isPaused ? "Bot Paused" : "Bot Stopped"}
+                {isActive ? "Bot Running" : (isPaused || pauseInfo?.paused) ? "Bot Paused" : "Bot Stopped"}
               </span>
               {isActive && activeSession && (
                 <span className="text-[10px] md:text-xs text-muted-foreground">
@@ -459,7 +459,7 @@ const Martingale = () => {
         </div>
 
         {/* Paused Session Banner */}
-        {isPaused && pauseInfo?.paused && (
+        {pauseInfo?.paused && (
           <div className="rounded-xl border border-yellow-500/50 bg-yellow-500/10 p-3 md:p-4">
             <div className="flex items-center gap-2 md:gap-3">
               <div className="w-8 h-8 md:w-10 md:h-10 rounded-lg bg-yellow-500/20 flex items-center justify-center shrink-0">

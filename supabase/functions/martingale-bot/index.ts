@@ -684,7 +684,7 @@ serve(async (req) => {
       const dailyLossLimit = await getDailyLossLimit(supabase);
       const decayStatus = await getDecayStatus(supabase);
 
-      // Get pause info for UI
+      // Get pause info for UI — check both order-fill pause and sideways pause
       let pauseInfo: { paused: boolean; pause_until?: string; reason?: string } = { paused: false };
       if (activeSession?.status === 'paused') {
         const { data: pauseData } = await supabase.from('bot_settings').select('key, value').in('key', ['pause_until', 'pause_reason']);
@@ -692,6 +692,14 @@ serve(async (req) => {
           const pauseUntil = pauseData.find((d: any) => d.key === 'pause_until')?.value;
           const pauseReason = pauseData.find((d: any) => d.key === 'pause_reason')?.value;
           pauseInfo = { paused: true, pause_until: pauseUntil, reason: pauseReason || 'Order fill failed' };
+        }
+      }
+      // Also check sideways pause (no active session but bot is paused between sessions)
+      if (!pauseInfo.paused && !activeSession) {
+        const sidewaysPauseCheck = await isInSidewaysPause(supabase);
+        if (sidewaysPauseCheck.paused) {
+          const { data: spData } = await supabase.from('bot_settings').select('value').eq('key', 'sideways_pause_until').maybeSingle();
+          pauseInfo = { paused: true, pause_until: spData?.value, reason: 'Sideways market detected — waiting for movement' };
         }
       }
 
@@ -712,54 +720,61 @@ serve(async (req) => {
     }
 
     if (action === 'stop') {
-      const { data: activeSession } = await supabase
+      // Stop ALL active sessions (handles race condition duplicates)
+      const { data: activeSessions } = await supabase
         .from('martingale_sessions')
         .select('*')
-        .eq('status', 'active')
-        .maybeSingle();
+        .eq('status', 'active');
 
-      if (activeSession) {
-        const { data: openTrade } = await supabase
-          .from('martingale_trades')
-          .select('*')
-          .eq('session_id', activeSession.id)
-          .eq('status', 'open')
-          .maybeSingle();
+      if (activeSessions && activeSessions.length > 0) {
+        for (const activeSession of activeSessions) {
+          const { data: openTrade } = await supabase
+            .from('martingale_trades')
+            .select('*')
+            .eq('session_id', activeSession.id)
+            .eq('status', 'open')
+            .maybeSingle();
 
-        if (openTrade) {
-          let exitPrice = openTrade.entry_price;
-          const result = await fetchNiftyOptionChain(supabaseUrl, anonKey, openTrade.strike_price, openTrade.option_type, openTrade.nifty_spot, openTrade.entry_price);
-          if (result.specificPrice !== null) exitPrice = result.specificPrice;
-          const pnl = (exitPrice - openTrade.entry_price) * openTrade.lots * LOT_SIZE;
+          if (openTrade) {
+            let exitPrice = openTrade.entry_price;
+            const result = await fetchNiftyOptionChain(supabaseUrl, anonKey, openTrade.strike_price, openTrade.option_type, openTrade.nifty_spot, openTrade.entry_price);
+            if (result.specificPrice !== null) exitPrice = result.specificPrice;
+            const pnl = (exitPrice - openTrade.entry_price) * openTrade.lots * LOT_SIZE;
 
-          if (activeSession.trading_mode === 'actual') {
-            const accessToken = await getUpstoxToken(supabase);
-            if (accessToken && result.specificInstrumentKey) {
-              const sellResult = await placeUpstoxOrder(accessToken, {
-                instrumentKey: result.specificInstrumentKey,
-                quantity: openTrade.lots * LOT_SIZE,
-                transactionType: 'SELL',
-                price: exitPrice,
-              });
-              if (!sellResult.success) {
-                console.error(`Stop sell order failed: ${sellResult.error}`);
+            if (activeSession.trading_mode === 'actual') {
+              const accessToken = await getUpstoxToken(supabase);
+              if (accessToken && result.specificInstrumentKey) {
+                const sellResult = await placeUpstoxOrder(accessToken, {
+                  instrumentKey: result.specificInstrumentKey,
+                  quantity: openTrade.lots * LOT_SIZE,
+                  transactionType: 'SELL',
+                  price: exitPrice,
+                });
+                if (!sellResult.success) {
+                  console.error(`Stop sell order failed: ${sellResult.error}`);
+                }
               }
             }
+
+            await supabase.from('martingale_trades').update({
+              status: 'closed', exit_price: exitPrice, pnl, exit_time: new Date().toISOString(),
+            }).eq('id', openTrade.id);
+
+            await supabase.from('martingale_sessions').update({
+              status: 'stopped', total_pnl: activeSession.total_pnl + pnl, completed_at: new Date().toISOString(),
+            }).eq('id', activeSession.id);
+          } else {
+            await supabase.from('martingale_sessions').update({
+              status: 'stopped', completed_at: new Date().toISOString(),
+            }).eq('id', activeSession.id);
           }
-
-          await supabase.from('martingale_trades').update({
-            status: 'closed', exit_price: exitPrice, pnl, exit_time: new Date().toISOString(),
-          }).eq('id', openTrade.id);
-
-          await supabase.from('martingale_sessions').update({
-            status: 'stopped', total_pnl: activeSession.total_pnl + pnl, completed_at: new Date().toISOString(),
-          }).eq('id', activeSession.id);
-        } else {
-          await supabase.from('martingale_sessions').update({
-            status: 'stopped', completed_at: new Date().toISOString(),
-          }).eq('id', activeSession.id);
         }
       }
+
+      // Also stop any paused sessions
+      await supabase.from('martingale_sessions').update({
+        status: 'stopped', completed_at: new Date().toISOString(),
+      }).eq('status', 'paused');
 
       // Clear sideways pause on manual stop
       await supabase.from('bot_settings').delete().eq('key', 'sideways_pause_until');
@@ -769,6 +784,17 @@ serve(async (req) => {
       });
     }
 
+    if (action === 'force_stop_all') {
+      // Bulk stop all active/paused sessions without P&L calculation (for cleanup)
+      await supabase.from('martingale_trades').update({ status: 'closed', exit_time: new Date().toISOString() }).eq('status', 'open');
+      await supabase.from('martingale_sessions').update({ status: 'stopped', completed_at: new Date().toISOString() }).eq('status', 'active');
+      await supabase.from('martingale_sessions').update({ status: 'stopped', completed_at: new Date().toISOString() }).eq('status', 'paused');
+      await supabase.from('bot_settings').delete().eq('key', 'sideways_pause_until');
+      await supabase.from('bot_settings').delete().eq('key', 'pause_until');
+      return new Response(JSON.stringify({ success: true, message: 'Force stopped all sessions' }), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
     if (action === 'start') {
       const tradingMode = body.trading_mode || 'paper';
       const maxRounds = Math.min(Math.max(parseInt(body.max_rounds) || DEFAULT_MAX_ROUNDS, 1), 10);
@@ -1115,10 +1141,53 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
       .maybeSingle();
 
     if (!activeCheck) {
+      // Check sideways_pause_until key BEFORE isInSidewaysPause clears it
+      const { data: rawPauseData } = await supabase
+        .from('bot_settings')
+        .select('value')
+        .eq('key', 'sideways_pause_until')
+        .maybeSingle();
+      
+      const hadSidewaysPause = !!rawPauseData?.value;
       const sidewaysPause = await isInSidewaysPause(supabase);
+      
       if (sidewaysPause.paused) {
         return { success: true, message: `⚠️ Sideways pause: ${sidewaysPause.remainingMins} min remaining. Will restart as fresh R1.` };
       }
+
+      // Only auto-restart if a sideways pause key existed and just expired (was cleared by isInSidewaysPause)
+      if (hadSidewaysPause && !sidewaysPause.paused) {
+        const inMorningWindow = tickTime >= (9 * 60 + 15) && tickTime <= (11 * 60 + 15);
+        const inAfternoonWindow = tickTime >= (14 * 60 + 30) && tickTime <= (15 * 60 + 25);
+        if (inMorningWindow || inAfternoonWindow) {
+          const dailyPnl = await getDailyPnl(supabase);
+          const dailyLimit = await getDailyLossLimit(supabase);
+          if (dailyPnl <= -dailyLimit) {
+            return { success: true, message: `Daily loss limit breached (₹${dailyPnl.toFixed(0)}). Not auto-restarting after sideways pause.` };
+          }
+
+          const { data: settings } = await supabase.from('bot_settings').select('key, value');
+          let savedMode = 'paper';
+          let savedMaxRounds = DEFAULT_MAX_ROUNDS;
+          if (settings) {
+            for (const s of settings) {
+              if (s.key === 'trading_mode') savedMode = s.value;
+              if (s.key === 'max_rounds') savedMaxRounds = Math.min(Math.max(parseInt(s.value) || DEFAULT_MAX_ROUNDS, 1), 10);
+            }
+          }
+
+          const startRes = await fetch(`${supabaseUrl}/functions/v1/martingale-bot`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${anonKey}` },
+            body: JSON.stringify({ action: 'start', trading_mode: savedMode, max_rounds: savedMaxRounds }),
+          });
+          const startData = await startRes.json();
+          await sendTelegram(`▶️ *Bot Resumed after sideways pause*\n${startData.message || 'Restarted as fresh R1'}`);
+          return { success: true, action: `▶️ Resumed after sideways pause: ${startData.message || 'restarted'}` };
+        }
+      }
+
+      return { success: true, message: 'No active session' };
     }
 
     const { data: activeSession } = await supabase
