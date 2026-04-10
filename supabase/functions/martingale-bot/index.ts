@@ -708,6 +708,9 @@ serve(async (req) => {
         }
       }
 
+      const { data: botRunningData } = await supabase.from('bot_settings').select('value').eq('key', 'bot_running').maybeSingle();
+      const botRunning = botRunningData?.value === 'true';
+
       return new Response(JSON.stringify({
         success: true,
         active_session: activeSession,
@@ -721,6 +724,7 @@ serve(async (req) => {
         daily_loss_limit: dailyLossLimit,
         decay_status: decayStatus,
         pause_info: pauseInfo,
+        bot_running: botRunning,
       }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
     }
 
@@ -784,6 +788,10 @@ serve(async (req) => {
       // Clear sideways pause on manual stop
       await supabase.from('bot_settings').delete().eq('key', 'sideways_pause_until');
 
+      if (!body.keep_running) {
+        await supabase.from('bot_settings').delete().eq('key', 'bot_running');
+      }
+
       return new Response(JSON.stringify({ success: true, message: 'Bot stopped' }), {
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       });
@@ -796,6 +804,7 @@ serve(async (req) => {
       await supabase.from('martingale_sessions').update({ status: 'stopped', completed_at: new Date().toISOString() }).eq('status', 'paused');
       await supabase.from('bot_settings').delete().eq('key', 'sideways_pause_until');
       await supabase.from('bot_settings').delete().eq('key', 'pause_until');
+      await supabase.from('bot_settings').delete().eq('key', 'bot_running');
       return new Response(JSON.stringify({ success: true, message: 'Force stopped all sessions' }), {
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       });
@@ -947,6 +956,8 @@ serve(async (req) => {
         });
       if (tradeErr) throw tradeErr;
 
+      await supabase.from('bot_settings').upsert({ key: 'bot_running', value: 'true', updated_at: new Date().toISOString() }, { onConflict: 'key' });
+
       const modeLabel = tradingMode === 'actual' ? '🔴 ACTUAL' : '📝 Paper';
       return new Response(JSON.stringify({
         success: true,
@@ -1038,7 +1049,7 @@ serve(async (req) => {
           const stopRes = await fetch(`${supabaseUrl}/functions/v1/martingale-bot`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${anonKey}` },
-            body: JSON.stringify({ action: 'stop' }),
+            body: JSON.stringify({ action: 'stop', keep_running: true }),
           });
           const stopData = await stopRes.json();
           tickResults.push(`⏰ Auto-stop (11:15 AM): ${stopData.message || 'stopped'}`);
@@ -1172,7 +1183,7 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
           }
 
           // RECHECK: Fetch fresh market data and verify sideways conditions have cleared
-          const optionData = await fetchNiftyOptionChain(supabaseUrl, anonKey);
+          const { optionData } = await fetchNiftyOptionChain(supabaseUrl, anonKey);
           if (optionData && optionData.niftySpot > 0) {
             // Get the Nifty spot stored when the pause was first triggered
             const { data: pauseSpotData } = await supabase.from('bot_settings').select('value').eq('key', 'sideways_pause_nifty_spot').maybeSingle();
@@ -1215,6 +1226,39 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
           const startData = await startRes.json();
           await sendTelegram(`▶️ *Bot Resumed after sideways pause*\nMarket movement confirmed — restarting as fresh R1`);
           return { success: true, action: `▶️ Resumed after sideways pause: ${startData.message || 'restarted'}` };
+        }
+      }
+
+      // Auto-restart if bot_running flag is set and within trading windows
+      const { data: botRunningFlag } = await supabase.from('bot_settings').select('value').eq('key', 'bot_running').maybeSingle();
+      if (botRunningFlag?.value === 'true') {
+        const inMorningWindow = tickTime >= (9 * 60 + 15) && tickTime <= (11 * 60 + 15);
+        const inAfternoonWindow = tickTime >= (14 * 60 + 30) && tickTime <= (15 * 60 + 20);
+        if (inMorningWindow || inAfternoonWindow) {
+          const dailyPnl = await getDailyPnl(supabase);
+          const dailyLimit = await getDailyLossLimit(supabase);
+          if (dailyPnl > -dailyLimit) {
+            const { data: settings } = await supabase.from('bot_settings').select('key, value');
+            let savedMode = 'paper';
+            let savedMaxRounds = DEFAULT_MAX_ROUNDS;
+            if (settings) {
+              for (const s of settings) {
+                if (s.key === 'trading_mode') savedMode = s.value;
+                if (s.key === 'max_rounds') savedMaxRounds = Math.min(Math.max(parseInt(s.value) || DEFAULT_MAX_ROUNDS, 1), 10);
+              }
+            }
+            const startRes = await fetch(`${supabaseUrl}/functions/v1/martingale-bot`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${anonKey}` },
+              body: JSON.stringify({ action: 'start', trading_mode: savedMode, max_rounds: savedMaxRounds }),
+            });
+            const startData = await startRes.json();
+            return { success: true, action: `▶️ Auto-restarted: ${startData.message || 'new session'}` };
+          } else {
+            return { success: true, message: `⚠️ Bot watching — daily loss limit hit` };
+          }
+        } else {
+          return { success: true, message: `⏸️ Bot watching — outside trading window` };
         }
       }
 
