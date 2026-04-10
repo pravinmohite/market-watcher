@@ -458,7 +458,37 @@ const Martingale = () => {
           </div>
         </div>
 
-        {/* Double Decay Warning Banner */}
+        {/* Paused Session Banner */}
+        {isPaused && pauseInfo?.paused && (
+          <div className="rounded-xl border border-yellow-500/50 bg-yellow-500/10 p-3 md:p-4">
+            <div className="flex items-center gap-2 md:gap-3">
+              <div className="w-8 h-8 md:w-10 md:h-10 rounded-lg bg-yellow-500/20 flex items-center justify-center shrink-0">
+                <AlertTriangle className="w-4 h-4 md:w-5 md:h-5 text-yellow-500" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <p className="text-xs md:text-sm font-semibold text-yellow-500">⏸️ Bot Paused — Auto-resuming</p>
+                <p className="text-[10px] md:text-xs text-muted-foreground mt-0.5">
+                  {pauseInfo.reason || 'Order fill failed after retries'}
+                </p>
+                {pauseInfo.pause_until && (
+                  <p className="text-[10px] md:text-xs text-muted-foreground mt-0.5">
+                    Resumes at: <span className="font-mono font-medium text-foreground">
+                      {new Date(pauseInfo.pause_until).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' })} IST
+                    </span>
+                  </p>
+                )}
+              </div>
+              {pauseInfo.pause_until && (() => {
+                const remaining = Math.max(0, Math.ceil((new Date(pauseInfo.pause_until).getTime() - Date.now()) / 60000));
+                return (
+                  <div className="shrink-0 px-2 py-1 rounded-full bg-yellow-500/20 text-yellow-500 text-[10px] md:text-xs font-mono font-medium animate-pulse">
+                    {remaining}m
+                  </div>
+                );
+              })()}
+            </div>
+          </div>
+        )}
         {decayStatus?.active && (
           <div className="rounded-xl border border-warning/50 bg-warning/10 p-3 md:p-4">
             <div className="flex items-center gap-2 md:gap-3">
