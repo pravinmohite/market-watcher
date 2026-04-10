@@ -943,6 +943,32 @@ serve(async (req) => {
         actualEntryPrice = buyResult.filledPrice;
       }
 
+      // Double-check for active session right before insert (race condition guard)
+      const { data: existingRecheck } = await supabase
+        .from('martingale_sessions')
+        .select('id')
+        .eq('status', 'active')
+        .maybeSingle();
+      if (existingRecheck) {
+        return new Response(JSON.stringify({ success: false, message: 'Bot already running (race guard)' }), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+
+      // Also check if a session was created very recently (within last 30s) to prevent rapid duplicates
+      const recentCutoff = new Date(Date.now() - 30000).toISOString();
+      const { data: recentSession } = await supabase
+        .from('martingale_sessions')
+        .select('id')
+        .gte('created_at', recentCutoff)
+        .limit(1)
+        .maybeSingle();
+      if (recentSession) {
+        return new Response(JSON.stringify({ success: false, message: 'Session created recently, skipping duplicate start' }), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+
       const { data: session, error: sessErr } = await supabase
         .from('martingale_sessions')
         .insert({ status: 'active', current_round: 1, max_rounds: maxRounds, trading_mode: tradingMode })
@@ -1294,6 +1320,18 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
       // Auto-restart if bot_running flag is set and within trading windows
       const { data: botRunningFlag } = await supabase.from('bot_settings').select('value').eq('key', 'bot_running').maybeSingle();
       if (botRunningFlag?.value === 'true') {
+        // Guard: skip auto-restart if a session was created in the last 60 seconds
+        const recentCutoff = new Date(Date.now() - 60000).toISOString();
+        const { data: recentSess } = await supabase
+          .from('martingale_sessions')
+          .select('id')
+          .gte('created_at', recentCutoff)
+          .limit(1)
+          .maybeSingle();
+        if (recentSess) {
+          return { success: true, message: 'Session created recently, skipping auto-restart' };
+        }
+
         const inMorningWindow = tickTime >= (9 * 60 + 25) && tickTime <= (11 * 60 + 15);
         const inAfternoonWindow = tickTime >= (14 * 60 + 30) && tickTime <= (15 * 60 + 25);
         if (inMorningWindow || inAfternoonWindow) {
