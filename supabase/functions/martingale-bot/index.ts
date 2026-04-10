@@ -684,7 +684,7 @@ serve(async (req) => {
       const dailyLossLimit = await getDailyLossLimit(supabase);
       const decayStatus = await getDecayStatus(supabase);
 
-      // Get pause info for UI
+      // Get pause info for UI — check both order-fill pause and sideways pause
       let pauseInfo: { paused: boolean; pause_until?: string; reason?: string } = { paused: false };
       if (activeSession?.status === 'paused') {
         const { data: pauseData } = await supabase.from('bot_settings').select('key, value').in('key', ['pause_until', 'pause_reason']);
@@ -692,6 +692,14 @@ serve(async (req) => {
           const pauseUntil = pauseData.find((d: any) => d.key === 'pause_until')?.value;
           const pauseReason = pauseData.find((d: any) => d.key === 'pause_reason')?.value;
           pauseInfo = { paused: true, pause_until: pauseUntil, reason: pauseReason || 'Order fill failed' };
+        }
+      }
+      // Also check sideways pause (no active session but bot is paused between sessions)
+      if (!pauseInfo.paused && !activeSession) {
+        const sidewaysPauseCheck = await isInSidewaysPause(supabase);
+        if (sidewaysPauseCheck.paused) {
+          const { data: spData } = await supabase.from('bot_settings').select('value').eq('key', 'sideways_pause_until').maybeSingle();
+          pauseInfo = { paused: true, pause_until: spData?.value, reason: 'Sideways market detected — waiting for movement' };
         }
       }
 
@@ -1119,6 +1127,40 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
       if (sidewaysPause.paused) {
         return { success: true, message: `⚠️ Sideways pause: ${sidewaysPause.remainingMins} min remaining. Will restart as fresh R1.` };
       }
+
+      // Sideways pause just expired — auto-start a new session
+      // Check if we're within trading windows before auto-starting
+      const inMorningWindow = tickTime >= (9 * 60 + 15) && tickTime <= (11 * 60 + 15);
+      const inAfternoonWindow = tickTime >= (14 * 60 + 30) && tickTime <= (15 * 60 + 25);
+      if (inMorningWindow || inAfternoonWindow) {
+        // Check daily loss limit before auto-starting
+        const dailyPnl = await getDailyPnl(supabase);
+        const dailyLimit = await getDailyLossLimit(supabase);
+        if (dailyPnl <= -dailyLimit) {
+          return { success: true, message: `Daily loss limit breached (₹${dailyPnl.toFixed(0)}). Not auto-restarting after sideways pause.` };
+        }
+
+        const { data: settings } = await supabase.from('bot_settings').select('key, value');
+        let savedMode = 'paper';
+        let savedMaxRounds = DEFAULT_MAX_ROUNDS;
+        if (settings) {
+          for (const s of settings) {
+            if (s.key === 'trading_mode') savedMode = s.value;
+            if (s.key === 'max_rounds') savedMaxRounds = Math.min(Math.max(parseInt(s.value) || DEFAULT_MAX_ROUNDS, 1), 10);
+          }
+        }
+
+        const startRes = await fetch(`${supabaseUrl}/functions/v1/martingale-bot`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${anonKey}` },
+          body: JSON.stringify({ action: 'start', trading_mode: savedMode, max_rounds: savedMaxRounds }),
+        });
+        const startData = await startRes.json();
+        await sendTelegram(`▶️ *Bot Resumed after sideways pause*\n${startData.message || 'Restarted as fresh R1'}`);
+        return { success: true, action: `▶️ Resumed after sideways pause: ${startData.message || 'restarted'}` };
+      }
+
+      return { success: true, message: 'No active session (outside trading window for auto-restart)' };
     }
 
     const { data: activeSession } = await supabase
