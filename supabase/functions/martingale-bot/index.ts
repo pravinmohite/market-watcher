@@ -795,7 +795,7 @@ serve(async (req) => {
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       });
     }
-
+    if (action === 'start') {
       const tradingMode = body.trading_mode || 'paper';
       const maxRounds = Math.min(Math.max(parseInt(body.max_rounds) || DEFAULT_MAX_ROUNDS, 1), 10);
       const skipDecayCheck = body.skip_decay_check === true; // Allow manual override
