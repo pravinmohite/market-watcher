@@ -1291,8 +1291,8 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
       // Auto-restart if bot_running flag is set and within trading windows
       const { data: botRunningFlag } = await supabase.from('bot_settings').select('value').eq('key', 'bot_running').maybeSingle();
       if (botRunningFlag?.value === 'true') {
-        const inMorningWindow = tickTime >= (9 * 60 + 15) && tickTime <= (11 * 60 + 15);
-        const inAfternoonWindow = tickTime >= (14 * 60 + 30) && tickTime <= (15 * 60 + 20);
+        const inMorningWindow = tickTime >= (9 * 60 + 25) && tickTime <= (11 * 60 + 15);
+        const inAfternoonWindow = tickTime >= (14 * 60 + 30) && tickTime <= (15 * 60 + 25);
         if (inMorningWindow || inAfternoonWindow) {
           const dailyPnl = await getDailyPnl(supabase);
           const dailyLimit = await getDailyLossLimit(supabase);
