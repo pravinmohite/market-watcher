@@ -1487,6 +1487,16 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
     //  Sideways detection now happens between rounds at R3+ entry.)
 
     async function startNewSession(lastOptionType: string, lastPnl: number) {
+      // Check if we're still in a trading window before starting new session
+      const nowCheck = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+      const checkTime = nowCheck.getHours() * 60 + nowCheck.getMinutes();
+      const inW1 = checkTime >= (9 * 60 + 25) && checkTime <= (11 * 60 + 15);
+      const inW2 = checkTime >= (14 * 60 + 30) && checkTime <= (15 * 60 + 25);
+      if (!inW1 && !inW2) {
+        console.log(`New session skipped: outside trading windows (${nowCheck.getHours()}:${String(nowCheck.getMinutes()).padStart(2, '0')} IST)`);
+        return;
+      }
+
       // Check sideways pause before starting new session
       const sidewaysPause = await isInSidewaysPause(supabase);
       if (sidewaysPause.paused) {
