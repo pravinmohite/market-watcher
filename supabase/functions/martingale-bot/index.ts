@@ -1141,55 +1141,56 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
     const inTradingWindow = inWindow1 || inWindow2;
 
     if (!inTradingWindow) {
-      // If there's an active session outside windows, square it off
-      const { data: activeOutside } = await supabase
+      // If there are active sessions outside windows, square them ALL off
+      const { data: activeOutsideList } = await supabase
         .from('martingale_sessions')
         .select('*')
-        .eq('status', 'active')
-        .maybeSingle();
+        .eq('status', 'active');
       
-      if (activeOutside) {
-        const { data: openTradeOutside } = await supabase
-          .from('martingale_trades')
-          .select('*')
-          .eq('session_id', activeOutside.id)
-          .eq('status', 'open')
-          .maybeSingle();
-        
-        if (openTradeOutside) {
-          const { specificPrice: sqPrice, specificInstrumentKey: sqInstrKey } = await fetchNiftyOptionChain(
-            supabaseUrl, anonKey, openTradeOutside.strike_price, openTradeOutside.option_type, openTradeOutside.nifty_spot, openTradeOutside.entry_price
-          );
-          const exitPrice = sqPrice !== null ? sqPrice : openTradeOutside.entry_price;
-          const sqPnl = (exitPrice - openTradeOutside.entry_price) * openTradeOutside.lots * LOT_SIZE;
+      if (activeOutsideList && activeOutsideList.length > 0) {
+        for (const activeOutside of activeOutsideList) {
+          const { data: openTradeOutside } = await supabase
+            .from('martingale_trades')
+            .select('*')
+            .eq('session_id', activeOutside.id)
+            .eq('status', 'open')
+            .maybeSingle();
+          
+          if (openTradeOutside) {
+            const { specificPrice: sqPrice, specificInstrumentKey: sqInstrKey } = await fetchNiftyOptionChain(
+              supabaseUrl, anonKey, openTradeOutside.strike_price, openTradeOutside.option_type, openTradeOutside.nifty_spot, openTradeOutside.entry_price
+            );
+            const exitPrice = sqPrice !== null ? sqPrice : openTradeOutside.entry_price;
+            const sqPnl = (exitPrice - openTradeOutside.entry_price) * openTradeOutside.lots * LOT_SIZE;
 
-          if (activeOutside.trading_mode === 'actual') {
-            const accessToken = await getUpstoxToken(supabase);
-            if (accessToken && sqInstrKey) {
-              await placeUpstoxOrder(accessToken, {
-                instrumentKey: sqInstrKey,
-                quantity: openTradeOutside.lots * LOT_SIZE,
-                transactionType: 'SELL',
-                price: exitPrice,
-              });
+            if (activeOutside.trading_mode === 'actual') {
+              const accessToken = await getUpstoxToken(supabase);
+              if (accessToken && sqInstrKey) {
+                await placeUpstoxOrder(accessToken, {
+                  instrumentKey: sqInstrKey,
+                  quantity: openTradeOutside.lots * LOT_SIZE,
+                  transactionType: 'SELL',
+                  price: exitPrice,
+                });
+              }
             }
+
+            await supabase.from('martingale_trades').update({
+              status: 'closed', exit_price: exitPrice, pnl: sqPnl, exit_time: new Date().toISOString(),
+            }).eq('id', openTradeOutside.id);
+
+            await supabase.from('martingale_sessions').update({
+              status: 'squared_off', total_pnl: activeOutside.total_pnl + sqPnl, completed_at: new Date().toISOString(),
+            }).eq('id', activeOutside.id);
+
+            const modeLabel = activeOutside.trading_mode === 'actual' ? '🔴' : '📝';
+            const windowLabel = tickTime > WINDOW_1_END && tickTime < WINDOW_2_START ? '11:15 AM' : '3:25 PM';
+            await sendTelegram(`${modeLabel} ⏰ *Window Closed (${windowLabel})*\nSquared off ${openTradeOutside.option_type} ${openTradeOutside.strike_price} @ ₹${exitPrice} (P&L: ₹${sqPnl.toFixed(0)})`);
+          } else {
+            await supabase.from('martingale_sessions').update({
+              status: 'squared_off', completed_at: new Date().toISOString(),
+            }).eq('id', activeOutside.id);
           }
-
-          await supabase.from('martingale_trades').update({
-            status: 'closed', exit_price: exitPrice, pnl: sqPnl, exit_time: new Date().toISOString(),
-          }).eq('id', openTradeOutside.id);
-
-          await supabase.from('martingale_sessions').update({
-            status: 'window_closed', total_pnl: activeOutside.total_pnl + sqPnl, completed_at: new Date().toISOString(),
-          }).eq('id', activeOutside.id);
-
-          const modeLabel = activeOutside.trading_mode === 'actual' ? '🔴' : '📝';
-          const windowLabel = tickTime > WINDOW_1_END && tickTime < WINDOW_2_START ? '11:15 AM' : '3:25 PM';
-          await sendTelegram(`${modeLabel} ⏰ *Window Closed (${windowLabel})*\nSquared off ${openTradeOutside.option_type} ${openTradeOutside.strike_price} @ ₹${exitPrice} (P&L: ₹${sqPnl.toFixed(0)})`);
-        } else {
-          await supabase.from('martingale_sessions').update({
-            status: 'window_closed', completed_at: new Date().toISOString(),
-          }).eq('id', activeOutside.id);
         }
       }
 
@@ -1373,11 +1374,40 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
       return { success: true, message: 'No active session' };
     }
 
-    const { data: activeSession } = await supabase
+    // Get ALL active sessions, keep latest, close duplicates
+    const { data: allActiveSessions } = await supabase
       .from('martingale_sessions')
       .select('*')
       .eq('status', 'active')
-      .maybeSingle();
+      .order('created_at', { ascending: false });
+
+    let activeSession = null;
+    if (allActiveSessions && allActiveSessions.length > 0) {
+      activeSession = allActiveSessions[0]; // Keep the latest
+      // Close any duplicates
+      if (allActiveSessions.length > 1) {
+        console.log(`⚠️ Found ${allActiveSessions.length} active sessions — cleaning up duplicates`);
+        for (let i = 1; i < allActiveSessions.length; i++) {
+          const dup = allActiveSessions[i];
+          // Close any open trades on the duplicate
+          const { data: dupTrades } = await supabase
+            .from('martingale_trades')
+            .select('id')
+            .eq('session_id', dup.id)
+            .eq('status', 'open');
+          if (dupTrades) {
+            for (const t of dupTrades) {
+              await supabase.from('martingale_trades').update({
+                status: 'closed', exit_time: new Date().toISOString(),
+              }).eq('id', t.id);
+            }
+          }
+          await supabase.from('martingale_sessions').update({
+            status: 'completed', completed_at: new Date().toISOString(),
+          }).eq('id', dup.id);
+        }
+      }
+    }
 
     if (!activeSession) {
       return { success: true, message: 'No active session' };
@@ -1536,7 +1566,7 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
     //  Sideways detection now happens between rounds at R3+ entry.)
 
     async function startNewSession(lastOptionType: string, lastPnl: number) {
-      // Check if we're still in a trading window before starting new session
+      // GUARD 1: Check if we're still in a trading window
       const nowCheck = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
       const checkTime = nowCheck.getHours() * 60 + nowCheck.getMinutes();
       const inW1 = checkTime >= (9 * 60 + 25) && checkTime <= (11 * 60 + 15);
@@ -1546,7 +1576,32 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
         return;
       }
 
-      // Check sideways pause before starting new session
+      // GUARD 2: Check no active session already exists (prevents duplicates)
+      const { data: existingActive } = await supabase
+        .from('martingale_sessions')
+        .select('id')
+        .eq('status', 'active')
+        .maybeSingle();
+      if (existingActive) {
+        console.log(`New session skipped: active session ${existingActive.id} already exists`);
+        return;
+      }
+
+      // GUARD 3: Check no session was created in the last 60 seconds
+      const recentCutoff = new Date(Date.now() - 60000).toISOString();
+      const { data: recentSess } = await supabase
+        .from('martingale_sessions')
+        .select('id')
+        .gte('created_at', recentCutoff)
+        .eq('status', 'active')
+        .limit(1)
+        .maybeSingle();
+      if (recentSess) {
+        console.log(`New session skipped: session ${recentSess.id} created within 60s`);
+        return;
+      }
+
+      // GUARD 4: Check sideways pause
       const sidewaysPause = await isInSidewaysPause(supabase);
       if (sidewaysPause.paused) {
         console.log(`New session skipped: sideways pause active (${sidewaysPause.remainingMins} min remaining)`);
@@ -1597,6 +1652,17 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
         }
       }
 
+      // GUARD 5: Final recheck right before insert
+      const { data: finalCheck } = await supabase
+        .from('martingale_sessions')
+        .select('id')
+        .eq('status', 'active')
+        .maybeSingle();
+      if (finalCheck) {
+        console.log(`New session skipped at final guard: active session ${finalCheck.id} exists`);
+        return;
+      }
+
       const { data: newSession } = await supabase
         .from('martingale_sessions')
         .insert({ status: 'active', current_round: 1, max_rounds: activeSession.max_rounds, trading_mode: tradingMode })
@@ -1607,10 +1673,6 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
           strike_price: newStrike, lots: 1,
           entry_price: actualNewPrice, status: 'open', nifty_spot: optionData.niftySpot,
         });
-
-
-
-
         console.log(`New session: ${newDirection} ${newStrike} @ ₹${actualNewPrice} (lastPnl=${lastPnl.toFixed(0)})`);
       }
     }
