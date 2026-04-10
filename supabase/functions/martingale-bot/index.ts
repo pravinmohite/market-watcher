@@ -720,54 +720,61 @@ serve(async (req) => {
     }
 
     if (action === 'stop') {
-      const { data: activeSession } = await supabase
+      // Stop ALL active sessions (handles race condition duplicates)
+      const { data: activeSessions } = await supabase
         .from('martingale_sessions')
         .select('*')
-        .eq('status', 'active')
-        .maybeSingle();
+        .eq('status', 'active');
 
-      if (activeSession) {
-        const { data: openTrade } = await supabase
-          .from('martingale_trades')
-          .select('*')
-          .eq('session_id', activeSession.id)
-          .eq('status', 'open')
-          .maybeSingle();
+      if (activeSessions && activeSessions.length > 0) {
+        for (const activeSession of activeSessions) {
+          const { data: openTrade } = await supabase
+            .from('martingale_trades')
+            .select('*')
+            .eq('session_id', activeSession.id)
+            .eq('status', 'open')
+            .maybeSingle();
 
-        if (openTrade) {
-          let exitPrice = openTrade.entry_price;
-          const result = await fetchNiftyOptionChain(supabaseUrl, anonKey, openTrade.strike_price, openTrade.option_type, openTrade.nifty_spot, openTrade.entry_price);
-          if (result.specificPrice !== null) exitPrice = result.specificPrice;
-          const pnl = (exitPrice - openTrade.entry_price) * openTrade.lots * LOT_SIZE;
+          if (openTrade) {
+            let exitPrice = openTrade.entry_price;
+            const result = await fetchNiftyOptionChain(supabaseUrl, anonKey, openTrade.strike_price, openTrade.option_type, openTrade.nifty_spot, openTrade.entry_price);
+            if (result.specificPrice !== null) exitPrice = result.specificPrice;
+            const pnl = (exitPrice - openTrade.entry_price) * openTrade.lots * LOT_SIZE;
 
-          if (activeSession.trading_mode === 'actual') {
-            const accessToken = await getUpstoxToken(supabase);
-            if (accessToken && result.specificInstrumentKey) {
-              const sellResult = await placeUpstoxOrder(accessToken, {
-                instrumentKey: result.specificInstrumentKey,
-                quantity: openTrade.lots * LOT_SIZE,
-                transactionType: 'SELL',
-                price: exitPrice,
-              });
-              if (!sellResult.success) {
-                console.error(`Stop sell order failed: ${sellResult.error}`);
+            if (activeSession.trading_mode === 'actual') {
+              const accessToken = await getUpstoxToken(supabase);
+              if (accessToken && result.specificInstrumentKey) {
+                const sellResult = await placeUpstoxOrder(accessToken, {
+                  instrumentKey: result.specificInstrumentKey,
+                  quantity: openTrade.lots * LOT_SIZE,
+                  transactionType: 'SELL',
+                  price: exitPrice,
+                });
+                if (!sellResult.success) {
+                  console.error(`Stop sell order failed: ${sellResult.error}`);
+                }
               }
             }
+
+            await supabase.from('martingale_trades').update({
+              status: 'closed', exit_price: exitPrice, pnl, exit_time: new Date().toISOString(),
+            }).eq('id', openTrade.id);
+
+            await supabase.from('martingale_sessions').update({
+              status: 'stopped', total_pnl: activeSession.total_pnl + pnl, completed_at: new Date().toISOString(),
+            }).eq('id', activeSession.id);
+          } else {
+            await supabase.from('martingale_sessions').update({
+              status: 'stopped', completed_at: new Date().toISOString(),
+            }).eq('id', activeSession.id);
           }
-
-          await supabase.from('martingale_trades').update({
-            status: 'closed', exit_price: exitPrice, pnl, exit_time: new Date().toISOString(),
-          }).eq('id', openTrade.id);
-
-          await supabase.from('martingale_sessions').update({
-            status: 'stopped', total_pnl: activeSession.total_pnl + pnl, completed_at: new Date().toISOString(),
-          }).eq('id', activeSession.id);
-        } else {
-          await supabase.from('martingale_sessions').update({
-            status: 'stopped', completed_at: new Date().toISOString(),
-          }).eq('id', activeSession.id);
         }
       }
+
+      // Also stop any paused sessions
+      await supabase.from('martingale_sessions').update({
+        status: 'stopped', completed_at: new Date().toISOString(),
+      }).eq('status', 'paused');
 
       // Clear sideways pause on manual stop
       await supabase.from('bot_settings').delete().eq('key', 'sideways_pause_until');
