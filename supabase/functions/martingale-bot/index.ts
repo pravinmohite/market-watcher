@@ -920,13 +920,16 @@ serve(async (req) => {
       const schedTime = schedHour * 60 + schedMinute;
       const schedDay = nowIST_sched.getDay();
 
+      // Year-specific NSE holidays (YYYY-MM-DD format)
       const NSE_HOLIDAYS: string[] = [
-        '0226', '0314', '0331', '0410', '0414', '0418', '0501', '0812', '0815', '0827', '1002', '1020', '1021', '1105', '1225',
-        '0126', '0303', '0326', '0331', '0403', '0414', '0501', '0528', '0626', '0914', '1002', '1020', '1110', '1124', '1225',
+        // 2025
+        '2025-02-26', '2025-03-14', '2025-03-31', '2025-04-10', '2025-04-14', '2025-04-18', '2025-05-01', '2025-08-12', '2025-08-15', '2025-08-27', '2025-10-02', '2025-10-20', '2025-10-21', '2025-11-05', '2025-12-25',
+        // 2026
+        '2026-01-26', '2026-03-03', '2026-03-26', '2026-03-31', '2026-04-03', '2026-04-14', '2026-05-01', '2026-05-28', '2026-06-26', '2026-09-14', '2026-10-02', '2026-10-20', '2026-11-10', '2026-11-24', '2026-12-25',
       ];
 
-      const schedMMDD = String(nowIST_sched.getMonth() + 1).padStart(2, '0') + String(nowIST_sched.getDate()).padStart(2, '0');
-      const isMarketDay = schedDay !== 0 && schedDay !== 6 && !NSE_HOLIDAYS.includes(schedMMDD);
+      const schedYMD = `${nowIST_sched.getFullYear()}-${String(nowIST_sched.getMonth() + 1).padStart(2, '0')}-${String(nowIST_sched.getDate()).padStart(2, '0')}`;
+      const isMarketDay = schedDay !== 0 && schedDay !== 6 && !NSE_HOLIDAYS.includes(schedYMD);
       const isExpiryDay = schedDay === 2;
 
       const AUTO_START_1 = 9 * 60 + 25;
