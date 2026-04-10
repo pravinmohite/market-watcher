@@ -176,6 +176,7 @@ const Martingale = () => {
   const serverDailyLossLimit = data?.daily_loss_limit ?? dailyLossLimit;
   const decayStatus = data?.decay_status;
   const pauseInfo = data?.pause_info;
+  const botRunning = data?.bot_running;
 
   // Build session mode lookup
   const sessionModeMap = useMemo(() => {
@@ -237,7 +238,7 @@ const Martingale = () => {
             </div>
             <div className="flex items-center gap-1.5 md:gap-3 shrink-0">
               {/* Settings inline on desktop only */}
-              {!isActive && (
+              {!isActive && !botRunning && (
                 <div className="hidden md:flex items-center gap-3">
                   <div className="flex items-center gap-2">
                     <span className={cn("text-xs font-medium", tradingMode === 'paper' ? "text-foreground" : "text-muted-foreground")}>Paper</span>
@@ -290,7 +291,7 @@ const Martingale = () => {
                   {activeSession.trading_mode === 'actual' ? '🔴 LIVE' : '📝 Paper'}
                 </span>
               )}
-              {isActive ? (
+              {(isActive || botRunning) ? (
                 <>
                   <Button onClick={() => tickBot.mutate()} disabled={tickBot.isPending} variant="outline" size="sm" className="gap-1 md:gap-1.5 h-8 px-2 md:px-3 text-xs">
                     <RefreshCw className={cn("w-3 h-3 md:w-3.5 md:h-3.5", tickBot.isPending && "animate-spin")} />
@@ -335,7 +336,7 @@ const Martingale = () => {
             </div>
           </div>
           {/* Settings row - mobile only */}
-          {!isActive && (
+          {!isActive && !botRunning && (
             <div className="flex md:hidden flex-wrap items-center gap-x-4 gap-y-2 mt-2 pt-2 border-t border-border/50">
               <div className="flex items-center gap-2">
                 <span className={cn("text-xs font-medium", tradingMode === 'paper' ? "text-foreground" : "text-muted-foreground")}>Paper</span>
@@ -435,10 +436,10 @@ const Martingale = () => {
             <div className="flex items-center gap-2">
               <div className={cn(
                 "w-2.5 h-2.5 md:w-3 md:h-3 rounded-full shrink-0",
-                isActive ? "bg-gain animate-pulse" : (isPaused || pauseInfo?.paused) ? "bg-yellow-500 animate-pulse" : "bg-muted-foreground"
+                isActive ? "bg-gain animate-pulse" : (isPaused || pauseInfo?.paused || botRunning) ? "bg-yellow-500 animate-pulse" : "bg-muted-foreground"
               )} />
               <span className="text-xs md:text-sm font-medium text-foreground">
-                {isActive ? "Bot Running" : (isPaused || pauseInfo?.paused) ? "Bot Paused" : "Bot Stopped"}
+                {isActive ? "Bot Running" : (isPaused || pauseInfo?.paused) ? "Bot Paused" : botRunning ? "Bot Paused — Watching" : "Bot Stopped"}
               </span>
               {isActive && activeSession && (
                 <span className="text-[10px] md:text-xs text-muted-foreground">
