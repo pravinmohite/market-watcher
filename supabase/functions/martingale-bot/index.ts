@@ -1127,6 +1127,21 @@ serve(async (req) => {
 // Single tick logic
 async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string, source: string): Promise<any> {
     const nowIST_tick = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+    const tickDay = nowIST_tick.getDay();
+    const tickYMD = `${nowIST_tick.getFullYear()}-${String(nowIST_tick.getMonth() + 1).padStart(2, '0')}-${String(nowIST_tick.getDate()).padStart(2, '0')}`;
+
+    // NSE holidays - must match the list in auto-schedule
+    const NSE_HOLIDAYS_TICK: string[] = [
+      '2025-02-26', '2025-03-14', '2025-03-31', '2025-04-10', '2025-04-14', '2025-04-18', '2025-05-01', '2025-08-12', '2025-08-15', '2025-08-27', '2025-10-02', '2025-10-20', '2025-10-21', '2025-11-05', '2025-12-25',
+      '2026-01-26', '2026-03-03', '2026-03-26', '2026-03-31', '2026-04-03', '2026-04-14', '2026-05-01', '2026-05-28', '2026-06-26', '2026-09-14', '2026-10-02', '2026-10-20', '2026-11-10', '2026-11-24', '2026-12-25',
+    ];
+
+    const isMarketDayTick = tickDay !== 0 && tickDay !== 6 && !NSE_HOLIDAYS_TICK.includes(tickYMD);
+
+    if (!isMarketDayTick) {
+      return { action: `⛔ Market closed today (${tickYMD}, day=${tickDay}). Skipping tick.` };
+    }
+
     const tickHour = nowIST_tick.getHours();
     const tickMinute = nowIST_tick.getMinutes();
     const tickTime = tickHour * 60 + tickMinute;
