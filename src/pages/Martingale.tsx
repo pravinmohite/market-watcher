@@ -181,6 +181,24 @@ const Martingale = () => {
   const pauseInfo = data?.pause_info;
   const botRunning = data?.bot_running;
 
+  // Check if market is open today (weekday + not NSE holiday)
+  const isMarketDay = useMemo(() => {
+    const now = new Date();
+    const day = now.getDay();
+    if (day === 0 || day === 6) return false;
+    const holidays = [
+      '2025-01-14','2025-02-26','2025-03-14','2025-03-31','2025-04-10','2025-04-14','2025-04-18',
+      '2025-05-01','2025-06-27','2025-08-15','2025-08-16','2025-08-27','2025-10-02','2025-10-20',
+      '2025-10-21','2025-10-22','2025-11-05','2025-11-26','2025-12-25',
+      '2026-01-26','2026-02-17','2026-03-10','2026-03-19','2026-03-20','2026-03-25',
+      '2026-04-03','2026-04-14','2026-05-01','2026-06-17','2026-07-07','2026-08-15',
+      '2026-08-28','2026-10-02','2026-10-09','2026-10-20','2026-10-21','2026-11-09',
+      '2026-11-16','2026-12-25',
+    ];
+    const dateStr = now.toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+    return !holidays.includes(dateStr);
+  }, []);
+
   // Build session mode lookup
   const sessionModeMap = useMemo(() => {
     const map: Record<string, string> = {};
