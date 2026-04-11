@@ -312,7 +312,7 @@ const Martingale = () => {
                   {activeSession.trading_mode === 'actual' ? '🔴 LIVE' : '📝 Paper'}
                 </span>
               )}
-              {(isActive || botRunning) ? (
+              {(isActive || botRunning) && isMarketDay ? (
                 <>
                   <Button onClick={() => tickBot.mutate()} disabled={tickBot.isPending} variant="outline" size="sm" className="gap-1 md:gap-1.5 h-8 px-2 md:px-3 text-xs">
                     <RefreshCw className={cn("w-3 h-3 md:w-3.5 md:h-3.5", tickBot.isPending && "animate-spin")} />
