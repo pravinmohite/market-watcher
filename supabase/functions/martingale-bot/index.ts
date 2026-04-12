@@ -153,7 +153,7 @@ async function placeUpstoxOrder(accessToken: string, params: {
     return { success: true, orderId: data.data?.order_id };
   } catch (error) {
     console.error('Upstox order error:', error);
-    return { success: false, error: error.message };
+    return { success: false, error: (error as Error).message };
   }
 }
 
