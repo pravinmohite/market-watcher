@@ -37,8 +37,6 @@ export type Database = {
       }
       martingale_sessions: {
         Row: {
-          anchor_otm_ce_premium: number | null
-          anchor_otm_pe_premium: number | null
           completed_at: string | null
           created_at: string
           current_round: number
@@ -50,8 +48,6 @@ export type Database = {
           trading_mode: string
         }
         Insert: {
-          anchor_otm_ce_premium?: number | null
-          anchor_otm_pe_premium?: number | null
           completed_at?: string | null
           created_at?: string
           current_round?: number
@@ -63,8 +59,6 @@ export type Database = {
           trading_mode?: string
         }
         Update: {
-          anchor_otm_ce_premium?: number | null
-          anchor_otm_pe_premium?: number | null
           completed_at?: string | null
           created_at?: string
           current_round?: number
