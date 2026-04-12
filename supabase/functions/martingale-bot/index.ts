@@ -1360,6 +1360,48 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
               }
             }
 
+            // RECHECK double decay: even if Nifty moved enough, check if both OTM premiums are still decaying
+            const currentCE = optionData.otmCEPrice;
+            const currentPE = optionData.otmPEPrice;
+            if (currentCE > 0 && currentPE > 0) {
+              // Find most recent completed session for premium anchors
+              const { data: lastSession } = await supabase
+                .from('martingale_sessions')
+                .select('id')
+                .eq('status', 'completed')
+                .order('created_at', { ascending: false })
+                .limit(1)
+                .maybeSingle();
+
+              if (lastSession) {
+                const { data: lastSessionTrades } = await supabase
+                  .from('martingale_trades')
+                  .select('nifty_spot, entry_price, option_type, round, entry_time')
+                  .eq('session_id', lastSession.id)
+                  .order('entry_time', { ascending: true });
+
+                const { anchorCE, anchorPE } = await getSessionPremiumAnchors(supabase, lastSession.id, lastSessionTrades);
+
+                if (anchorCE != null && anchorPE != null && anchorCE > 0 && anchorPE > 0) {
+                  const ceRatio = currentCE / anchorCE;
+                  const peRatio = currentPE / anchorPE;
+                  const stillDoubleDecay = ceRatio < SIDEWAYS_PREMIUM_DECLINE_RATIO && peRatio < SIDEWAYS_PREMIUM_DECLINE_RATIO;
+
+                  if (stillDoubleDecay) {
+                    // Update stored spot to current for next recheck cycle
+                    await supabase.from('bot_settings').upsert({
+                      key: 'sideways_pause_nifty_spot', value: String(optionData.niftySpot), updated_at: new Date().toISOString(),
+                    }, { onConflict: 'key' });
+                    const newPauseUntil = await setSidewaysPause(supabase);
+                    const ceDecay = ((1 - ceRatio) * 100).toFixed(1);
+                    const peDecay = ((1 - peRatio) * 100).toFixed(1);
+                    await sendTelegram(`⚠️ *Double decay still active*\nNifty moved but both premiums still decaying.\nCE: ₹${anchorCE.toFixed(0)}→₹${currentCE.toFixed(0)} (${ceDecay}% down)\nPE: ₹${anchorPE.toFixed(0)}→₹${currentPE.toFixed(0)} (${peDecay}% down)\nRe-pausing 15 min until ${new Date(newPauseUntil).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata' })} IST`);
+                    return { success: true, message: `⚠️ Double decay recheck: both premiums still decaying (CE ${ceDecay}%, PE ${peDecay}%). Re-paused 15 min.` };
+                  }
+                }
+              }
+            }
+
             // Clean up pause spot
             await supabase.from('bot_settings').delete().eq('key', 'sideways_pause_nifty_spot');
           }
