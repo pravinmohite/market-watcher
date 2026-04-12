@@ -259,7 +259,7 @@ const Martingale = () => {
             </div>
             <div className="flex items-center gap-1.5 md:gap-3 shrink-0">
               {/* Settings inline on desktop only */}
-              {!isActive && !botRunning && (
+              {!(isActive && isMarketDay) && !(botRunning && isMarketDay) && (
                 <div className="hidden md:flex items-center gap-3">
                   <div className="flex items-center gap-2">
                     <span className={cn("text-xs font-medium", tradingMode === 'paper' ? "text-foreground" : "text-muted-foreground")}>Paper</span>
@@ -357,7 +357,7 @@ const Martingale = () => {
             </div>
           </div>
           {/* Settings row - mobile only */}
-          {!isActive && !botRunning && (
+          {!(isActive && isMarketDay) && !(botRunning && isMarketDay) && (
             <div className="flex md:hidden flex-wrap items-center gap-x-4 gap-y-2 mt-2 pt-2 border-t border-border/50">
               <div className="flex items-center gap-2">
                 <span className={cn("text-xs font-medium", tradingMode === 'paper' ? "text-foreground" : "text-muted-foreground")}>Paper</span>
