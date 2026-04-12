@@ -637,9 +637,9 @@ serve(async (req) => {
           }
 
           // Store instrument keys found via contract API
-          var savedCEKey = otmCEInstrumentKey;
-          var savedPEKey = otmPEInstrumentKey;
-          var savedSpecificKey = specificInstrumentKey;
+          var savedCEKey: string = otmCEInstrumentKey;
+          var savedPEKey: string = otmPEInstrumentKey;
+          var savedSpecificKey: string = specificInstrumentKey;
 
           console.log('Falling back to NSE estimates (keys preserved if found)');
           // Fall through to NSE fallback below
@@ -714,9 +714,9 @@ serve(async (req) => {
       }
 
       // Carry over instrument keys from Upstox contract API if available
-      const finalCEKey = (typeof savedCEKey !== 'undefined' && savedCEKey) || '';
-      const finalPEKey = (typeof savedPEKey !== 'undefined' && savedPEKey) || '';
-      const finalSpecificKey = (typeof savedSpecificKey !== 'undefined' && savedSpecificKey) || '';
+      const finalCEKey = (typeof savedCEKey !== 'undefined' && savedCEKey) ? savedCEKey : '';
+      const finalPEKey = (typeof savedPEKey !== 'undefined' && savedPEKey) ? savedPEKey : '';
+      const finalSpecificKey = (typeof savedSpecificKey !== 'undefined' && savedSpecificKey) ? savedSpecificKey : '';
 
       return new Response(JSON.stringify({
         success: true,

@@ -153,7 +153,7 @@ async function placeUpstoxOrder(accessToken: string, params: {
     return { success: true, orderId: data.data?.order_id };
   } catch (error) {
     console.error('Upstox order error:', error);
-    return { success: false, error: error.message };
+    return { success: false, error: (error as Error).message };
   }
 }
 
@@ -1163,7 +1163,7 @@ serve(async (req) => {
 
   } catch (error) {
     console.error("Martingale bot error:", error);
-    return new Response(JSON.stringify({ success: false, error: error.message }), {
+    return new Response(JSON.stringify({ success: false, error: (error as Error).message }), {
       status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
   }
@@ -1441,7 +1441,7 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
       .eq('status', 'active')
       .order('created_at', { ascending: false });
 
-    let activeSession = null;
+    let activeSession: any = null;
     if (allActiveSessions && allActiveSessions.length > 0) {
       activeSession = allActiveSessions[0]; // Keep the latest
       // Close any duplicates
