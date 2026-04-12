@@ -294,7 +294,47 @@ async function sendTelegram(text: string) {
 // this gates ENTRY into R3+ by checking:
 // 1) Were the last 2 rounds both losses?
 // 2) Is Nifty range-bound (< threshold pts in recent history)?
-// If both → skip entry, end session, reset to R1, pause 15 min.
+// 3) Both OTM CE & PE premiums down vs session-start chain snapshot (double decay)
+// If (1) and (2) OR (1) and (3) → skip entry, end session, reset to R1, pause 15 min.
+
+/** Resolve CE/PE premium anchors for double-decay: prefer columns set at session start; else earliest trade per side (legacy sessions). */
+async function getSessionPremiumAnchors(
+  supabase: any,
+  sessionId: string,
+  allSessionTrades: any[] | null,
+): Promise<{ anchorCE: number | null; anchorPE: number | null }> {
+  const { data: sessRow } = await supabase
+    .from('martingale_sessions')
+    .select('anchor_otm_ce_premium, anchor_otm_pe_premium')
+    .eq('id', sessionId)
+    .maybeSingle();
+
+  let anchorCE = sessRow?.anchor_otm_ce_premium != null ? Number(sessRow.anchor_otm_ce_premium) : null;
+  let anchorPE = sessRow?.anchor_otm_pe_premium != null ? Number(sessRow.anchor_otm_pe_premium) : null;
+
+  if (anchorCE != null && (Number.isNaN(anchorCE) || anchorCE <= 0)) anchorCE = null;
+  if (anchorPE != null && (Number.isNaN(anchorPE) || anchorPE <= 0)) anchorPE = null;
+
+  const needCE = anchorCE == null;
+  const needPE = anchorPE == null;
+  if ((needCE || needPE) && allSessionTrades && allSessionTrades.length > 0) {
+    const sorted = [...allSessionTrades].sort(
+      (a, b) => new Date(a.entry_time).getTime() - new Date(b.entry_time).getTime(),
+    );
+    if (needCE) {
+      const firstCE = sorted.find((t: any) => t.option_type === 'CE');
+      const v = firstCE ? Number(firstCE.entry_price) : NaN;
+      if (!Number.isNaN(v) && v > 0) anchorCE = v;
+    }
+    if (needPE) {
+      const firstPE = sorted.find((t: any) => t.option_type === 'PE');
+      const v = firstPE ? Number(firstPE.entry_price) : NaN;
+      if (!Number.isNaN(v) && v > 0) anchorPE = v;
+    }
+  }
+
+  return { anchorCE, anchorPE };
+}
 
 async function shouldSkipNextRound(
   supabase: any, 
@@ -351,19 +391,12 @@ async function shouldSkipNextRound(
 
   const marketSideways = niftyRange < SIDEWAYS_NIFTY_RANGE_THRESHOLD;
 
-  // Signal 2: Both premiums decaying from R1 anchor (catches IV crush days)
+  // Signal 2: Both OTM premiums decaying vs same-session anchors (session-start chain snapshot, or legacy: first CE/PE entry)
   let bothDecaying = false;
   let decayDetail = '';
-  if (currentCEPrice && currentPEPrice && allSessionTrades && allSessionTrades.length > 0) {
-    // Find R1 entry price as the premium anchor
-    const r1CE = allSessionTrades.find((t: any) => t.round === 1 && t.option_type === 'CE');
-    const r1PE = allSessionTrades.find((t: any) => t.round === 1 && t.option_type === 'PE');
-    
-    // Use R1 entry prices if available, otherwise use earliest trade of each type
-    const anchorCE = r1CE ? Number(r1CE.entry_price) : null;
-    const anchorPE = r1PE ? Number(r1PE.entry_price) : null;
-
-    if (anchorCE && anchorPE && anchorCE > 0 && anchorPE > 0) {
+  if (currentCEPrice && currentPEPrice && currentCEPrice > 0 && currentPEPrice > 0) {
+    const { anchorCE, anchorPE } = await getSessionPremiumAnchors(supabase, sessionId, allSessionTrades);
+    if (anchorCE != null && anchorPE != null && anchorCE > 0 && anchorPE > 0) {
       const ceRatio = currentCEPrice / anchorCE;
       const peRatio = currentPEPrice / anchorPE;
       bothDecaying = ceRatio < SIDEWAYS_PREMIUM_DECLINE_RATIO && peRatio < SIDEWAYS_PREMIUM_DECLINE_RATIO;
@@ -381,7 +414,7 @@ async function shouldSkipNextRound(
   if (bothDecaying) {
     return {
       skip: true,
-      reason: `R${nextRound}: last 2 rounds both losses + both premiums decaying from R1. ${decayDetail}. IV crush / theta trap detected.`,
+      reason: `R${nextRound}: last 2 rounds both losses + both OTM premiums decaying vs session anchors. ${decayDetail}. IV crush / theta trap detected.`,
     };
   }
 
@@ -977,9 +1010,21 @@ serve(async (req) => {
         });
       }
 
+      const anchorCe =
+        typeof optionData.otmCEPrice === 'number' && optionData.otmCEPrice > 0 ? optionData.otmCEPrice : null;
+      const anchorPe =
+        typeof optionData.otmPEPrice === 'number' && optionData.otmPEPrice > 0 ? optionData.otmPEPrice : null;
+
       const { data: session, error: sessErr } = await supabase
         .from('martingale_sessions')
-        .insert({ status: 'active', current_round: 1, max_rounds: maxRounds, trading_mode: tradingMode })
+        .insert({
+          status: 'active',
+          current_round: 1,
+          max_rounds: maxRounds,
+          trading_mode: tradingMode,
+          anchor_otm_ce_premium: anchorCe,
+          anchor_otm_pe_premium: anchorPe,
+        })
         .select()
         .single();
       if (sessErr) throw sessErr;
@@ -1678,10 +1723,23 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
         return;
       }
 
+      const newAnchorCe =
+        typeof optionData.otmCEPrice === 'number' && optionData.otmCEPrice > 0 ? optionData.otmCEPrice : null;
+      const newAnchorPe =
+        typeof optionData.otmPEPrice === 'number' && optionData.otmPEPrice > 0 ? optionData.otmPEPrice : null;
+
       const { data: newSession } = await supabase
         .from('martingale_sessions')
-        .insert({ status: 'active', current_round: 1, max_rounds: activeSession.max_rounds, trading_mode: tradingMode })
-        .select().single();
+        .insert({
+          status: 'active',
+          current_round: 1,
+          max_rounds: activeSession.max_rounds,
+          trading_mode: tradingMode,
+          anchor_otm_ce_premium: newAnchorCe,
+          anchor_otm_pe_premium: newAnchorPe,
+        })
+        .select()
+        .single();
       if (newSession) {
         await supabase.from('martingale_trades').insert({
           session_id: newSession.id, round: 1, option_type: newDirection,
