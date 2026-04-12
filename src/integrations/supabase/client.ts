@@ -2,8 +2,24 @@
 import { createClient } from '@supabase/supabase-js';
 import type { Database } from './types';
 
-const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
-const SUPABASE_PUBLISHABLE_KEY = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY;
+const rawUrl = import.meta.env.VITE_SUPABASE_URL;
+const rawKey = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY;
+
+const SUPABASE_URL =
+  typeof rawUrl === 'string' && rawUrl.trim() !== ''
+    ? rawUrl.trim()
+    : 'https://env-not-configured.supabase.co';
+
+const SUPABASE_PUBLISHABLE_KEY =
+  typeof rawKey === 'string' && rawKey.trim() !== ''
+    ? rawKey.trim()
+    : 'sb-publishable-key-not-configured';
+
+if (import.meta.env.DEV && (rawUrl === undefined || String(rawUrl).trim() === '' || rawKey === undefined || String(rawKey).trim() === '')) {
+  console.warn(
+    '[market-watcher] Set VITE_SUPABASE_URL and VITE_SUPABASE_PUBLISHABLE_KEY in .env (see .env.example). The app will load, but Supabase calls will fail until they are set.',
+  );
+}
 
 // Import the supabase client like this:
 // import { supabase } from "@/integrations/supabase/client";

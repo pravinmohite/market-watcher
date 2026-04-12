@@ -16,9 +16,12 @@ const Login = () => {
 
   // If already logged in, redirect to martingale
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      if (session) navigate("/martingale", { replace: true });
-    });
+    supabase.auth
+      .getSession()
+      .then(({ data: { session } }) => {
+        if (session) navigate("/martingale", { replace: true });
+      })
+      .catch(() => {});
   }, [navigate]);
 
   const handleLogin = async (e: React.FormEvent) => {
