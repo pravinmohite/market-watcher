@@ -883,6 +883,21 @@ serve(async (req) => {
         });
       }
 
+      // Throttle guard: reject if a session was created in the last 30 seconds (prevents race conditions from concurrent ticks)
+      const throttleCutoff = new Date(Date.now() - 30000).toISOString();
+      const { data: recentSession } = await supabase
+        .from('martingale_sessions')
+        .select('id')
+        .gte('created_at', throttleCutoff)
+        .limit(1)
+        .maybeSingle();
+
+      if (recentSession) {
+        return new Response(JSON.stringify({ success: false, message: 'Session created recently, throttling duplicate start' }), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+
       // Check for sideways pause before starting
       if (!skipDecayCheck) {
         const sidewaysPause = await isInSidewaysPause(supabase);
