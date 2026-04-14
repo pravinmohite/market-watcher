@@ -1013,13 +1013,13 @@ serve(async (req) => {
 
       // Also check if a session was created very recently (within last 30s) to prevent rapid duplicates
       const recentCutoff = new Date(Date.now() - 30000).toISOString();
-      const { data: recentSession } = await supabase
+      const { data: recentSession2 } = await supabase
         .from('martingale_sessions')
         .select('id')
         .gte('created_at', recentCutoff)
         .limit(1)
         .maybeSingle();
-      if (recentSession) {
+      if (recentSession2) {
         return new Response(JSON.stringify({ success: false, message: 'Session created recently, skipping duplicate start' }), {
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         });
