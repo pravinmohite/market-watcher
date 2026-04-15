@@ -259,7 +259,7 @@ const Martingale = () => {
             </div>
             <div className="flex items-center gap-1.5 md:gap-3 shrink-0">
               {/* Settings inline on desktop only */}
-              {!(isActive && isMarketDay) && !(botRunning && isMarketDay) && (
+              {!isActive && (
                 <div className="hidden md:flex items-center gap-3">
                   <div className="flex items-center gap-2">
                     <span className={cn("text-xs font-medium", tradingMode === 'paper' ? "text-foreground" : "text-muted-foreground")}>Paper</span>
@@ -312,7 +312,7 @@ const Martingale = () => {
                   {activeSession.trading_mode === 'actual' ? '🔴 LIVE' : '📝 Paper'}
                 </span>
               )}
-              {(isActive || botRunning) && isMarketDay ? (
+              {isActive ? (
                 <>
                   <Button onClick={() => tickBot.mutate()} disabled={tickBot.isPending} variant="outline" size="sm" className="gap-1 md:gap-1.5 h-8 px-2 md:px-3 text-xs">
                     <RefreshCw className={cn("w-3 h-3 md:w-3.5 md:h-3.5", tickBot.isPending && "animate-spin")} />
@@ -357,7 +357,7 @@ const Martingale = () => {
             </div>
           </div>
           {/* Settings row - mobile only */}
-          {!(isActive && isMarketDay) && !(botRunning && isMarketDay) && (
+          {!isActive && (
             <div className="flex md:hidden flex-wrap items-center gap-x-4 gap-y-2 mt-2 pt-2 border-t border-border/50">
               <div className="flex items-center gap-2">
                 <span className={cn("text-xs font-medium", tradingMode === 'paper' ? "text-foreground" : "text-muted-foreground")}>Paper</span>
