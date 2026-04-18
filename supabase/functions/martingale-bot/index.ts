@@ -369,9 +369,9 @@ async function shouldSkipNextRound(
     return { skip: false, reason: `R${nextRound}: last 2 rounds not both losses — proceed` };
   }
 
-  // Both were losses — now check TWO signals (either one triggers skip)
+  // Both were losses — now check combined signals (decay AND low range together)
 
-  // Signal 1: Nifty range-bound (market going nowhere)
+  // Signal 1: Nifty range (market movement during session)
   const { data: allSessionTrades } = await supabase
     .from('martingale_trades')
     .select('nifty_spot, entry_price, option_type, round, entry_time')
@@ -389,36 +389,54 @@ async function shouldSkipNextRound(
     }
   }
 
-  const marketSideways = niftyRange < SIDEWAYS_NIFTY_RANGE_THRESHOLD;
-
-  // Signal 2: Both OTM premiums decaying vs same-session anchors (session-start chain snapshot, or legacy: first CE/PE entry)
-  let bothDecaying = false;
+  // Signal 2: Both OTM premiums decaying vs same-session anchors
+  // Two tiers: STRONG (~6% decay) and MILD (~3% decay)
+  const STRONG_DECAY = 0.94; // ~6% decay
+  const WEAK_DECAY = 0.97;   // ~3% decay
+  let strongDoubleDecay = false;
+  let mildDoubleDecay = false;
   let decayDetail = '';
+
   if (currentCEPrice && currentPEPrice && currentCEPrice > 0 && currentPEPrice > 0) {
     const { anchorCE, anchorPE } = await getSessionPremiumAnchors(supabase, sessionId, allSessionTrades);
     if (anchorCE != null && anchorPE != null && anchorCE > 0 && anchorPE > 0) {
       const ceRatio = currentCEPrice / anchorCE;
       const peRatio = currentPEPrice / anchorPE;
-      bothDecaying = ceRatio < SIDEWAYS_PREMIUM_DECLINE_RATIO && peRatio < SIDEWAYS_PREMIUM_DECLINE_RATIO;
+      strongDoubleDecay = ceRatio < STRONG_DECAY && peRatio < STRONG_DECAY;
+      mildDoubleDecay   = ceRatio < WEAK_DECAY   && peRatio < WEAK_DECAY;
       decayDetail = `CE: ₹${anchorCE.toFixed(0)}→₹${currentCEPrice.toFixed(0)} (${((1 - ceRatio) * 100).toFixed(1)}% down), PE: ₹${anchorPE.toFixed(0)}→₹${currentPEPrice.toFixed(0)} (${((1 - peRatio) * 100).toFixed(1)}% down)`;
     }
   }
 
-  if (marketSideways) {
-    return { 
-      skip: true, 
-      reason: `R${nextRound}: last 2 rounds both losses + Nifty range only ${niftyRange.toFixed(0)}pts (< ${SIDEWAYS_NIFTY_RANGE_THRESHOLD}pts). Sideways trap detected.`,
-    };
-  }
-
-  if (bothDecaying) {
+  // HARD BLOCK: strong decay + very dead market
+  if (strongDoubleDecay && niftyRange < 20) {
     return {
       skip: true,
-      reason: `R${nextRound}: last 2 rounds both losses + both OTM premiums decaying vs session anchors. ${decayDetail}. IV crush / theta trap detected.`,
+      reason: `R${nextRound}: Strong double decay + very low range (${niftyRange.toFixed(0)}pts). Dead market. ${decayDetail}`,
     };
   }
 
-  return { skip: false, reason: `R${nextRound}: last 2 losses but market moving (range ${niftyRange.toFixed(0)}pts) and premiums not both decaying — proceed` };
+  // SOFT BLOCK: mild decay + low movement
+  if (mildDoubleDecay && niftyRange < 25) {
+    return {
+      skip: true,
+      reason: `R${nextRound}: Mild double decay + low range (${niftyRange.toFixed(0)}pts). Avoid trap. ${decayDetail}`,
+    };
+  }
+
+  // FALLBACK SAFETY: no premium data available AND market is extremely dead
+  if ((!currentCEPrice || !currentPEPrice) && niftyRange < 15) {
+    return {
+      skip: true,
+      reason: `R${nextRound}: No premium data + extreme low range (${niftyRange.toFixed(0)}pts). Safety skip.`,
+    };
+  }
+
+  // FINAL ALLOW
+  return {
+    skip: false,
+    reason: `R${nextRound}: Allowed — movement present (range ${niftyRange.toFixed(0)}pts) or decay not strong`,
+  };
 }
 
 // Check if currently in a sideways pause period
