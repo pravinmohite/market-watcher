@@ -15,11 +15,23 @@ const ORDER_FILL_MAX_RETRIES = 3;
 const ORDER_FILL_CHECK_INTERVAL_MS = 8000;
 const ORDER_FILL_MAX_CHECKS = 3;
 const PAUSE_DURATION_MS = 10 * 60 * 1000;
-const SIDEWAYS_PAUSE_DURATION_MS = 15 * 60 * 1000; // 15 min pause after sideways skip
-const SIDEWAYS_MIN_ROUND = 3; // Only gate entry from R3 onwards
-const SIDEWAYS_NIFTY_RANGE_THRESHOLD = 50; // Nifty range < 50pts in session = sideways (initial gate)
+//const SIDEWAYS_PAUSE_DURATION_MS = 15 * 60 * 1000; // 15 min pause after sideways skip
+//const SIDEWAYS_MIN_ROUND = 3; // Only gate entry from R3 onwards
+//const SIDEWAYS_NIFTY_RANGE_THRESHOLD = 50; // Nifty range < 50pts in session = sideways (initial gate)
 const SIDEWAYS_RECHECK_THRESHOLD = 30; // Nifty must move 30pts from pause spot to resume
 const SIDEWAYS_PREMIUM_DECLINE_RATIO = 0.97; // Both premiums down >3% from R1 = decay
+
+// --- Configuration Constants (NEW) ---
+const SIDEWAYS_NIFTY_RANGE_THRESHOLD = 25;  // pts (strong decay)
+const SIDEWAYS_NIFTY_RANGE_THRESHOLD_WEAK = 30;  // pts (mild decay)
+const SIDEWAYS_PREMIUM_DECAY_STRONG = 0.94;
+const SIDEWAYS_PREMIUM_DECAY_WEAK = 0.97;
+const MIN_OPTION_PREMIUM = 80;   // ignore options cheaper than this
+const RECENT_TRADES_WINDOW = 5;  // use last 5 trades for range
+const SIDEWAYS_PAUSE_DURATION_MS = 15 * 60 * 1000;
+const SIDEWAYS_MIN_ROUND = 3;
+const SIDEWAYS_PAUSE_DURATION_MIN = SIDEWAYS_PAUSE_DURATION_MS / 60000;
+
 
 async function getDailyPnl(supabase: any): Promise<number> {
   const nowIST = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
@@ -289,15 +301,54 @@ async function sendTelegram(text: string) {
   }
 }
 
-// ========== BETWEEN-ROUND SIDEWAYS GATE ==========
-// Instead of detecting decay mid-trade (the -2% stop handles that),
-// this gates ENTRY into R3+ by checking:
-// 1) Were the last 2 rounds both losses?
-// 2) Is Nifty range-bound (< threshold pts in recent history)?
-// 3) Both OTM CE & PE premiums down vs session-start chain snapshot (double decay)
-// If (1) and (2) OR (1) and (3) → skip entry, end session, reset to R1, pause 15 min.
+// // ========== BETWEEN-ROUND SIDEWAYS GATE ==========
+// // Instead of detecting decay mid-trade (the -2% stop handles that),
+// // this gates ENTRY into R3+ by checking:
+// // 1) Were the last 2 rounds both losses?
+// // 2) Is Nifty range-bound (< threshold pts in recent history)?
+// // 3) Both OTM CE & PE premiums down vs session-start chain snapshot (double decay)
+// // If (1) and (2) OR (1) and (3) → skip entry, end session, reset to R1, pause 15 min.
 
-/** Resolve CE/PE premium anchors for double-decay: prefer columns set at session start; else earliest trade per side (legacy sessions). */
+// /** Resolve CE/PE premium anchors for double-decay: prefer columns set at session start; else earliest trade per side (legacy sessions). */
+// async function getSessionPremiumAnchors(
+//   supabase: any,
+//   sessionId: string,
+//   allSessionTrades: any[] | null,
+// ): Promise<{ anchorCE: number | null; anchorPE: number | null }> {
+//   const { data: sessRow } = await supabase
+//     .from('martingale_sessions')
+//     .select('anchor_otm_ce_premium, anchor_otm_pe_premium')
+//     .eq('id', sessionId)
+//     .maybeSingle();
+
+//   let anchorCE = sessRow?.anchor_otm_ce_premium != null ? Number(sessRow.anchor_otm_ce_premium) : null;
+//   let anchorPE = sessRow?.anchor_otm_pe_premium != null ? Number(sessRow.anchor_otm_pe_premium) : null;
+
+//   if (anchorCE != null && (Number.isNaN(anchorCE) || anchorCE <= 0)) anchorCE = null;
+//   if (anchorPE != null && (Number.isNaN(anchorPE) || anchorPE <= 0)) anchorPE = null;
+
+//   // const needCE = anchorCE == null;
+//   // const needPE = anchorPE == null;
+//   // if ((needCE || needPE) && allSessionTrades && allSessionTrades.length > 0) {
+//   //   const sorted = [...allSessionTrades].sort(
+//   //     (a, b) => new Date(a.entry_time).getTime() - new Date(b.entry_time).getTime(),
+//   //   );
+//   //   if (needCE) {
+//   //     const firstCE = sorted.find((t: any) => t.option_type === 'CE');
+//   //     const v = firstCE ? Number(firstCE.entry_price) : NaN;
+//   //     if (!Number.isNaN(v) && v > 0) anchorCE = v;
+//   //   }
+//   //   if (needPE) {
+//   //     const firstPE = sorted.find((t: any) => t.option_type === 'PE');
+//   //     const v = firstPE ? Number(firstPE.entry_price) : NaN;
+//   //     if (!Number.isNaN(v) && v > 0) anchorPE = v;
+//   //   }
+//   // }
+
+//   return { anchorCE, anchorPE };
+// }
+
+// --- 1. Premium Anchor Retrieval ---
 async function getSessionPremiumAnchors(
   supabase: any,
   sessionId: string,
@@ -309,36 +360,158 @@ async function getSessionPremiumAnchors(
     .eq('id', sessionId)
     .maybeSingle();
 
-  let anchorCE = sessRow?.anchor_otm_ce_premium != null ? Number(sessRow.anchor_otm_ce_premium) : null;
-  let anchorPE = sessRow?.anchor_otm_pe_premium != null ? Number(sessRow.anchor_otm_pe_premium) : null;
+  let anchorCE = sessRow?.anchor_otm_ce_premium != null 
+                 ? Number(sessRow.anchor_otm_ce_premium) : null;
+  let anchorPE = sessRow?.anchor_otm_pe_premium != null 
+                 ? Number(sessRow.anchor_otm_pe_premium) : null;
 
-  if (anchorCE != null && (Number.isNaN(anchorCE) || anchorCE <= 0)) anchorCE = null;
-  if (anchorPE != null && (Number.isNaN(anchorPE) || anchorPE <= 0)) anchorPE = null;
+  if (anchorCE !== null && (Number.isNaN(anchorCE) || anchorCE <= 0)) anchorCE = null;
+  if (anchorPE !== null && (Number.isNaN(anchorPE) || anchorPE <= 0)) anchorPE = null;
 
-  const needCE = anchorCE == null;
-  const needPE = anchorPE == null;
-  if ((needCE || needPE) && allSessionTrades && allSessionTrades.length > 0) {
-    const sorted = [...allSessionTrades].sort(
-      (a, b) => new Date(a.entry_time).getTime() - new Date(b.entry_time).getTime(),
-    );
-    if (needCE) {
-      const firstCE = sorted.find((t: any) => t.option_type === 'CE');
-      const v = firstCE ? Number(firstCE.entry_price) : NaN;
-      if (!Number.isNaN(v) && v > 0) anchorCE = v;
-    }
-    if (needPE) {
-      const firstPE = sorted.find((t: any) => t.option_type === 'PE');
-      const v = firstPE ? Number(firstPE.entry_price) : NaN;
-      if (!Number.isNaN(v) && v > 0) anchorPE = v;
-    }
-  }
-
+  // REMOVED: No trade-based fallback. Anchors must come from DB (set at session start).
   return { anchorCE, anchorPE };
 }
 
+
+
+// async function shouldSkipNextRound(
+//   supabase: any, 
+//   sessionId: string, 
+//   nextRound: number,
+//   niftySpot: number,
+//   supabaseUrl: string,
+//   anonKey: string,
+//   currentCEPrice?: number,
+//   currentPEPrice?: number,
+// ): Promise<{ skip: boolean; reason: string }> {
+//   // R1 and R2 — always allow, early losses are normal
+//   if (nextRound < SIDEWAYS_MIN_ROUND) {
+//     return { skip: false, reason: `R${nextRound}: allowed (< R${SIDEWAYS_MIN_ROUND})` };
+//   }
+
+//   // Check if last 2 rounds in this session were both losses
+//   const { data: recentTrades } = await supabase
+//     .from('martingale_trades')
+//     .select('round, pnl, status, nifty_spot')
+//     .eq('session_id', sessionId)
+//     .eq('status', 'closed')
+//     .order('round', { ascending: false })
+//     .limit(2);
+
+//   if (!recentTrades || recentTrades.length < 2) {
+//     return { skip: false, reason: 'Not enough trade history to evaluate' };
+//   }
+
+//   const lastTwoLosses = recentTrades.every((t: any) => (t.pnl || 0) < 0);
+//   if (!lastTwoLosses) {
+//     return { skip: false, reason: `R${nextRound}: last 2 rounds not both losses — proceed` };
+//   }
+
+//   // Both were losses — now check combined signals (decay AND low range together)
+
+//   // Signal 1: Nifty range (market movement during session)
+//   const { data: allSessionTrades } = await supabase
+//     .from('martingale_trades')
+//     .select('nifty_spot, entry_price, option_type, round, entry_time')
+//     .eq('session_id', sessionId)
+//     .order('entry_time', { ascending: true });
+
+//   let niftyRange = 0;
+//   if (allSessionTrades && allSessionTrades.length > 0) {
+//     const spots = allSessionTrades
+//       .map((t: any) => Number(t.nifty_spot))
+//       .filter((s: number) => s > 0);
+//     if (spots.length > 0) {
+//       // UPDATED: Use only recent trades for range
+//       const RECENT_WINDOW = 5; // take last 5 data points (configurable)
+//       const recentSpots = spots.slice(-RECENT_WINDOW);
+//       recentSpots.push(niftySpot);
+//     //  spots.push(niftySpot);
+//     //  niftyRange = Math.max(...spots) - Math.min(...spots);
+//       niftyRange = Math.max(...recentSpots) - Math.min(...recentSpots);
+//     }
+//   }
+
+//   // Signal 2: Both OTM premiums decaying vs same-session anchors
+//   // Two tiers: STRONG (~6% decay) and MILD (~3% decay)
+//   const STRONG_DECAY = 0.94; // ~6% decay
+//   const WEAK_DECAY = 0.97;   // ~3% decay
+//   const MIN_PREMIUM = 80;    // NEW (ignore very cheap options)
+//   let strongDoubleDecay = false;
+//   let mildDoubleDecay = false;
+//   let decayDetail = '';
+
+//   if (currentCEPrice && currentPEPrice && currentCEPrice > 0 && currentPEPrice > 0) {
+//     const { anchorCE, anchorPE } = await getSessionPremiumAnchors(supabase, sessionId, allSessionTrades);
+//     if (anchorCE != null && anchorPE != null && anchorCE > 0 && anchorPE > 0) {
+//       if (anchorCE > MIN_PREMIUM && anchorPE > MIN_PREMIUM) {
+//         const ceRatio = currentCEPrice / anchorCE;
+//         const peRatio = currentPEPrice / anchorPE;
+//         strongDoubleDecay = ceRatio < STRONG_DECAY && peRatio < STRONG_DECAY;
+//         mildDoubleDecay   = ceRatio < WEAK_DECAY   && peRatio < WEAK_DECAY;
+//         decayDetail = `CE: ₹${anchorCE.toFixed(0)}→₹${currentCEPrice.toFixed(0)} (${((1 - ceRatio) * 100).toFixed(1)}% down), PE: ₹${anchorPE.toFixed(0)}→₹${currentPEPrice.toFixed(0)} (${((1 - peRatio) * 100).toFixed(1)}% down)`;
+//       }
+//     }
+//   }
+
+//   // HARD BLOCK: strong decay + very dead market
+//   if (strongDoubleDecay && niftyRange < 25) {
+//     return {
+//       skip: true,
+//       reason: `R${nextRound}: Strong double decay + very low range (${niftyRange.toFixed(0)}pts). Dead market. ${decayDetail}`,
+//     };
+//   }
+
+//   // SOFT BLOCK: mild decay + low movement
+//   if (mildDoubleDecay && niftyRange < 30) {
+//     return {
+//       skip: true,
+//       reason: `R${nextRound}: Mild double decay + low range (${niftyRange.toFixed(0)}pts). Avoid trap. ${decayDetail}`,
+//     };
+//   }
+
+//   // FALLBACK SAFETY: no premium data available AND market is extremely dead
+//   if ((!currentCEPrice || !currentPEPrice) && niftyRange < 15) {
+//     return {
+//       skip: true,
+//       reason: `R${nextRound}: No premium data + extreme low range (${niftyRange.toFixed(0)}pts). Safety skip.`,
+//     };
+//   }
+
+//   // FINAL ALLOW
+//   return {
+//     skip: false,
+//     reason: `R${nextRound}: Allowed — movement present (range ${niftyRange.toFixed(0)}pts) or decay not strong`,
+//   };
+// }
+
+// Modified to re-check after pause expiry
+
+
+// // --- Configuration Constants (NEW) ---
+// const SIDEWAYS_NIFTY_RANGE_THRESHOLD = 25;  // pts (strong decay)
+// const SIDEWAYS_NIFTY_RANGE_THRESHOLD_WEAK = 30;  // pts (mild decay)
+// const SIDEWAYS_PREMIUM_DECAY_STRONG = 0.94;
+// const SIDEWAYS_PREMIUM_DECAY_WEAK = 0.97;
+// const MIN_OPTION_PREMIUM = 80;   // ignore options cheaper than this
+// const RECENT_TRADES_WINDOW = 5;  // use last 5 trades for range
+// const SIDEWAYS_PAUSE_DURATION_MS = 15 * 60 * 1000;
+// const SIDEWAYS_MIN_ROUND = 3;
+// const SIDEWAYS_PAUSE_DURATION_MIN = SIDEWAYS_PAUSE_DURATION_MS / 60000;
+
+// --- Helper Function (NEW) ---
+function calculateRange(spots: number[], currentSpot: number, window: number): number {
+  // Takes last `window` spots plus the current spot to compute range
+  const recent = spots.slice(-window);
+  recent.push(currentSpot);
+  return Math.max(...recent) - Math.min(...recent);
+}
+
+
+// --- 2. Sideways Skip Logic ---
 async function shouldSkipNextRound(
-  supabase: any, 
-  sessionId: string, 
+  supabase: any,
+  sessionId: string,
   nextRound: number,
   niftySpot: number,
   supabaseUrl: string,
@@ -346,118 +519,166 @@ async function shouldSkipNextRound(
   currentCEPrice?: number,
   currentPEPrice?: number,
 ): Promise<{ skip: boolean; reason: string }> {
-  // R1 and R2 — always allow, early losses are normal
   if (nextRound < SIDEWAYS_MIN_ROUND) {
-    return { skip: false, reason: `R${nextRound}: allowed (< R${SIDEWAYS_MIN_ROUND})` };
+    return { skip: false, reason: `R${nextRound}: allowed (<R${SIDEWAYS_MIN_ROUND})` };
   }
 
-  // Check if last 2 rounds in this session were both losses
   const { data: recentTrades } = await supabase
     .from('martingale_trades')
-    .select('round, pnl, status, nifty_spot')
+    .select('round, pnl')
     .eq('session_id', sessionId)
     .eq('status', 'closed')
     .order('round', { ascending: false })
     .limit(2);
-
   if (!recentTrades || recentTrades.length < 2) {
-    return { skip: false, reason: 'Not enough trade history to evaluate' };
+    return { skip: false, reason: 'Not enough history' };
   }
-
   const lastTwoLosses = recentTrades.every((t: any) => (t.pnl || 0) < 0);
   if (!lastTwoLosses) {
-    return { skip: false, reason: `R${nextRound}: last 2 rounds not both losses — proceed` };
+    return { skip: false, reason: `R${nextRound}: last 2 not both losses` };
   }
 
-  // Both were losses — now check combined signals (decay AND low range together)
-
-  // Signal 1: Nifty range (market movement during session)
+  // Compute recent Nifty range (last RECENT_TRADES_WINDOW trades)
   const { data: allSessionTrades } = await supabase
     .from('martingale_trades')
-    .select('nifty_spot, entry_price, option_type, round, entry_time')
+    .select('nifty_spot, entry_time')
     .eq('session_id', sessionId)
     .order('entry_time', { ascending: true });
-
   let niftyRange = 0;
   if (allSessionTrades && allSessionTrades.length > 0) {
-    const spots = allSessionTrades
-      .map((t: any) => Number(t.nifty_spot))
-      .filter((s: number) => s > 0);
+    const spots = allSessionTrades.map((t: any) => Number(t.nifty_spot)).filter((s: number) => s > 0);
     if (spots.length > 0) {
-      spots.push(niftySpot);
-      niftyRange = Math.max(...spots) - Math.min(...spots);
+      niftyRange = calculateRange(spots, niftySpot, RECENT_TRADES_WINDOW);
     }
   }
 
-  // Signal 2: Both OTM premiums decaying vs same-session anchors
-  // Two tiers: STRONG (~6% decay) and MILD (~3% decay)
-  const STRONG_DECAY = 0.94; // ~6% decay
-  const WEAK_DECAY = 0.97;   // ~3% decay
-  let strongDoubleDecay = false;
-  let mildDoubleDecay = false;
+  // Check premium decay vs anchors
+  let strongDoubleDecay = false, mildDoubleDecay = false;
   let decayDetail = '';
-
-  if (currentCEPrice && currentPEPrice && currentCEPrice > 0 && currentPEPrice > 0) {
+  if (currentCEPrice > 0 && currentPEPrice > 0) {
     const { anchorCE, anchorPE } = await getSessionPremiumAnchors(supabase, sessionId, allSessionTrades);
-    if (anchorCE != null && anchorPE != null && anchorCE > 0 && anchorPE > 0) {
+    if (anchorCE && anchorPE && anchorCE > MIN_OPTION_PREMIUM && anchorPE > MIN_OPTION_PREMIUM) {
       const ceRatio = currentCEPrice / anchorCE;
       const peRatio = currentPEPrice / anchorPE;
-      strongDoubleDecay = ceRatio < STRONG_DECAY && peRatio < STRONG_DECAY;
-      mildDoubleDecay   = ceRatio < WEAK_DECAY   && peRatio < WEAK_DECAY;
-      decayDetail = `CE: ₹${anchorCE.toFixed(0)}→₹${currentCEPrice.toFixed(0)} (${((1 - ceRatio) * 100).toFixed(1)}% down), PE: ₹${anchorPE.toFixed(0)}→₹${currentPEPrice.toFixed(0)} (${((1 - peRatio) * 100).toFixed(1)}% down)`;
+      strongDoubleDecay = (ceRatio < SIDEWAYS_PREMIUM_DECAY_STRONG && peRatio < SIDEWAYS_PREMIUM_DECAY_STRONG);
+      mildDoubleDecay   = (ceRatio < SIDEWAYS_PREMIUM_DECAY_WEAK   && peRatio < SIDEWAYS_PREMIUM_DECAY_WEAK);
+      decayDetail = `CE ₹${anchorCE.toFixed(0)}→₹${currentCEPrice.toFixed(0)} (${((1-ceRatio)*100).toFixed(1)}%), ` +
+                    `PE ₹${anchorPE.toFixed(0)}→₹${currentPEPrice.toFixed(0)} (${((1-peRatio)*100).toFixed(1)}%)`;
     }
   }
 
-  // HARD BLOCK: strong decay + very dead market
-  if (strongDoubleDecay && niftyRange < 20) {
+  // HARD block: strong decay + range under threshold
+  if (strongDoubleDecay && niftyRange < SIDEWAYS_NIFTY_RANGE_THRESHOLD) {
     return {
       skip: true,
-      reason: `R${nextRound}: Strong double decay + very low range (${niftyRange.toFixed(0)}pts). Dead market. ${decayDetail}`,
+      reason: `R${nextRound}: Strong decay + low range (${niftyRange.toFixed(0)} pts). ${decayDetail}`,
     };
   }
-
-  // SOFT BLOCK: mild decay + low movement
-  if (mildDoubleDecay && niftyRange < 25) {
+  // SOFT block: mild decay + range under threshold_weaker
+  if (mildDoubleDecay && niftyRange < SIDEWAYS_NIFTY_RANGE_THRESHOLD_WEAK) {
     return {
       skip: true,
-      reason: `R${nextRound}: Mild double decay + low range (${niftyRange.toFixed(0)}pts). Avoid trap. ${decayDetail}`,
+      reason: `R${nextRound}: Mild decay + low range (${niftyRange.toFixed(0)} pts). ${decayDetail}`,
     };
   }
-
-  // FALLBACK SAFETY: no premium data available AND market is extremely dead
+  // Safety: extreme scenario
   if ((!currentCEPrice || !currentPEPrice) && niftyRange < 15) {
     return {
       skip: true,
-      reason: `R${nextRound}: No premium data + extreme low range (${niftyRange.toFixed(0)}pts). Safety skip.`,
+      reason: `R${nextRound}: No price data + very low range (${niftyRange.toFixed(0)} pts).`,
     };
   }
 
-  // FINAL ALLOW
-  return {
-    skip: false,
-    reason: `R${nextRound}: Allowed — movement present (range ${niftyRange.toFixed(0)}pts) or decay not strong`,
-  };
+  return { skip: false, reason: `R${nextRound}: Market moving (${niftyRange.toFixed(0)} pts) or decay not strong` };
 }
 
-// Check if currently in a sideways pause period
-async function isInSidewaysPause(supabase: any): Promise<{ paused: boolean; remainingMins: number }> {
+
+async function isInSidewaysPause(
+  supabase: any,
+  sessionId: string,
+  niftySpot: number,
+  supabaseUrl: string,
+  anonKey: string,
+  currentCEPrice?: number,
+  currentPEPrice?: number,
+): Promise<{ paused: boolean; remainingMins: number }> {
   const { data } = await supabase
     .from('bot_settings')
     .select('value')
     .eq('key', 'sideways_pause_until')
     .maybeSingle();
 
-  if (!data?.value) return { paused: false, remainingMins: 0 };
-
-  const pauseUntil = new Date(data.value).getTime();
-  if (Date.now() >= pauseUntil) {
-    await supabase.from('bot_settings').delete().eq('key', 'sideways_pause_until');
+  if (!data?.value) {
     return { paused: false, remainingMins: 0 };
   }
+  const pauseUntil = new Date(data.value).getTime();
 
-  const remainingMins = Math.ceil((pauseUntil - Date.now()) / 60000);
-  return { paused: true, remainingMins };
+  // Still in pause period
+  if (Date.now() < pauseUntil) {
+    const remainingMins = Math.ceil((pauseUntil - Date.now()) / 60000);
+    return { paused: true, remainingMins };
+  }
+
+  // Pause expired — recheck conditions (NEW)
+  const nextRound = 3; // assume we are about to enter R3 after pause
+  const { skip, reason } = await shouldSkipNextRound(
+    supabase, sessionId, nextRound,
+    niftySpot, supabaseUrl, anonKey,
+    currentCEPrice, currentPEPrice
+  );
+
+  if (skip) {
+    // Extend pause (NEW)
+    await setSidewaysPause(supabase);
+    return { paused: true, remainingMins: Math.ceil(SIDEWAYS_PAUSE_DURATION_MS / 60000) };
+  }
+
+  // Conditions cleared — exit pause
+  await supabase.from('bot_settings').delete().eq('key', 'sideways_pause_until');
+  return { paused: false, remainingMins: 0 };
 }
+
+
+// // Check if currently in a sideways pause period
+// async function isInSidewaysPause(supabase: any): Promise<{ paused: boolean; remainingMins: number }> {
+//   const { data } = await supabase
+//     .from('bot_settings')
+//     .select('value')
+//     .eq('key', 'sideways_pause_until')
+//     .maybeSingle();
+
+//   if (!data?.value) return { paused: false, remainingMins: 0 };
+
+//   const pauseUntil = new Date(data.value).getTime();
+
+//    // Still in pause period
+//    if (Date.now() < pauseUntil) {
+//     const remainingMins = Math.ceil((pauseUntil - Date.now()) / 60000);
+//     return { paused: true, remainingMins };
+//   }
+  
+
+
+//   if (Date.now() >= pauseUntil) {
+//     await supabase.from('bot_settings').delete().eq('key', 'sideways_pause_until');
+//     return { paused: false, remainingMins: 0 };
+//   }
+
+//   const remainingMins = Math.ceil((pauseUntil - Date.now()) / 60000);
+//   return { paused: true, remainingMins };
+// }
+
+
+//old code
+// async function setSidewaysPause(supabase: any): Promise<string> {
+//   const pauseUntil = new Date(Date.now() + SIDEWAYS_PAUSE_DURATION_MS).toISOString();
+//   await supabase.from('bot_settings').upsert({
+//     key: 'sideways_pause_until',
+//     value: pauseUntil,
+//     updated_at: new Date().toISOString(),
+//   }, { onConflict: 'key' });
+//   return pauseUntil;
+// }
 
 async function setSidewaysPause(supabase: any): Promise<string> {
   const pauseUntil = new Date(Date.now() + SIDEWAYS_PAUSE_DURATION_MS).toISOString();
@@ -468,6 +689,7 @@ async function setSidewaysPause(supabase: any): Promise<string> {
   }, { onConflict: 'key' });
   return pauseUntil;
 }
+
 
 // Get sideways gate status for UI display
 async function getDecayStatus(supabase: any): Promise<any> {
