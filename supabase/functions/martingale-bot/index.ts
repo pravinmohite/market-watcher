@@ -949,26 +949,21 @@ serve(async (req) => {
         .from('martingale_sessions')
         .select('*')
         .order('created_at', { ascending: false })
-        .limit(2000);
+        .limit(10000);
 
       let allTrades: any[] = [];
-      if (recentSessions && recentSessions.length > 0) {
-        const oldestSession = recentSessions[recentSessions.length - 1];
-        // Fetch all trades from the oldest session onwards, paginated to avoid limits
-        let offset = 0;
-        const pageSize = 5000;
-        while (true) {
-          const { data: trades } = await supabase
-            .from('martingale_trades')
-            .select('*')
-            .gte('entry_time', oldestSession.created_at)
-            .order('entry_time', { ascending: false })
-            .range(offset, offset + pageSize - 1);
-          if (!trades || trades.length === 0) break;
-          allTrades = allTrades.concat(trades);
-          if (trades.length < pageSize) break;
-          offset += pageSize;
-        }
+      let offset = 0;
+      const pageSize = 5000;
+      while (true) {
+        const { data: trades } = await supabase
+          .from('martingale_trades')
+          .select('*')
+          .order('entry_time', { ascending: false })
+          .range(offset, offset + pageSize - 1);
+        if (!trades || trades.length === 0) break;
+        allTrades = allTrades.concat(trades);
+        if (trades.length < pageSize) break;
+        offset += pageSize;
       }
 
       const dailyPnl = await getDailyPnl(supabase);
