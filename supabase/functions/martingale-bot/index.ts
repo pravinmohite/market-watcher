@@ -555,7 +555,7 @@ async function shouldSkipNextRound(
   // Check premium decay vs anchors
   let strongDoubleDecay = false, mildDoubleDecay = false;
   let decayDetail = '';
-  if (currentCEPrice > 0 && currentPEPrice > 0) {
+  if (typeof currentCEPrice === 'number' && typeof currentPEPrice === 'number' && currentCEPrice > 0 && currentPEPrice > 0) {
     const { anchorCE, anchorPE } = await getSessionPremiumAnchors(supabase, sessionId, allSessionTrades);
     if (anchorCE && anchorPE && anchorCE > MIN_OPTION_PREMIUM && anchorPE > MIN_OPTION_PREMIUM) {
       const ceRatio = currentCEPrice / anchorCE;
@@ -595,10 +595,10 @@ async function shouldSkipNextRound(
 
 async function isInSidewaysPause(
   supabase: any,
-  sessionId: string,
-  niftySpot: number,
-  supabaseUrl: string,
-  anonKey: string,
+  sessionId?: string,
+  niftySpot?: number,
+  supabaseUrl?: string,
+  anonKey?: string,
   currentCEPrice?: number,
   currentPEPrice?: number,
 ): Promise<{ paused: boolean; remainingMins: number }> {
@@ -617,6 +617,11 @@ async function isInSidewaysPause(
   if (Date.now() < pauseUntil) {
     const remainingMins = Math.ceil((pauseUntil - Date.now()) / 60000);
     return { paused: true, remainingMins };
+  }
+
+  if (!sessionId || typeof niftySpot !== 'number' || !supabaseUrl || !anonKey) {
+    await supabase.from('bot_settings').delete().eq('key', 'sideways_pause_until');
+    return { paused: false, remainingMins: 0 };
   }
 
   // Pause expired — recheck conditions (NEW)
