@@ -456,6 +456,10 @@ serve(async (req) => {
 
     // Handle nifty option chain request (used by martingale bot)
     if (body.action === 'nifty-option-chain') {
+      let savedCEKey = '';
+      let savedPEKey = '';
+      let savedSpecificKey = '';
+
       // Try Upstox API first if we have a valid token
       const { data: upstoxToken } = await supabase
         .from('upstox_tokens')
@@ -637,9 +641,9 @@ serve(async (req) => {
           }
 
           // Store instrument keys found via contract API
-          var savedCEKey: string = otmCEInstrumentKey;
-          var savedPEKey: string = otmPEInstrumentKey;
-          var savedSpecificKey: string = specificInstrumentKey;
+          savedCEKey = otmCEInstrumentKey;
+          savedPEKey = otmPEInstrumentKey;
+          savedSpecificKey = specificInstrumentKey;
 
           console.log('Falling back to NSE estimates (keys preserved if found)');
           // Fall through to NSE fallback below
