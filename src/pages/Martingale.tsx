@@ -208,7 +208,7 @@ const Martingale = () => {
     return map;
   }, [recentSessions]);
 
-  // Filter trades and sessions to last 2 days
+  // Keep Date-wise P&L on full history; only the trade/session detail lists are limited.
   const twoDaysAgo = useMemo(() => {
     const d = new Date();
     d.setDate(d.getDate() - 2);
@@ -229,6 +229,14 @@ const Martingale = () => {
     recentSessions.filter((s: any) => new Date(s.created_at) >= twoDaysAgo),
     [recentSessions, twoDaysAgo]
   );
+
+  const historicalSessionModeMap = useMemo(() => {
+    const map: Record<string, string> = { ...sessionModeMap };
+    for (const trade of allTrades) {
+      if (trade.session_id && !map[trade.session_id]) map[trade.session_id] = trade.trading_mode || 'paper';
+    }
+    return map;
+  }, [allTrades, sessionModeMap]);
 
   return (
     <div className="min-h-screen bg-background">
@@ -630,7 +638,7 @@ const Martingale = () => {
         </section>
 
         {/* Date-wise P&L Summary (all days) */}
-        <DateWisePnL sessions={recentSessions} allTrades={allTrades} sessionModeMap={sessionModeMap} />
+        <DateWisePnL sessions={recentSessions} allTrades={allTrades} sessionModeMap={historicalSessionModeMap} />
 
         <section>
           <div className="flex items-center justify-between mb-3">
