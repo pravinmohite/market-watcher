@@ -77,6 +77,27 @@ export type Database = {
         }
         Relationships: []
       }
+      martingale_daily_reports: {
+        Row: {
+          created_at: string
+          id: string
+          report: Json
+          trading_day: string
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          report?: Json
+          trading_day: string
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          report?: Json
+          trading_day?: string
+        }
+        Relationships: []
+      }
       martingale_trades: {
         Row: {
           entry_price: number
@@ -88,10 +109,19 @@ export type Database = {
           nifty_spot: number | null
           option_type: string
           pnl: number | null
+          pnl_pct: number | null
+          position_qty: number | null
           round: number
           session_id: string
           status: string
+          stop_loss_pct: number | null
+          streak_losses_before: number | null
+          streak_wins_before: number | null
           strike_price: number
+          symbol: string
+          target_pct: number | null
+          trade_log: Json
+          trade_result: string | null
         }
         Insert: {
           entry_price: number
@@ -103,10 +133,19 @@ export type Database = {
           nifty_spot?: number | null
           option_type: string
           pnl?: number | null
+          pnl_pct?: number | null
+          position_qty?: number | null
           round: number
           session_id: string
           status?: string
+          stop_loss_pct?: number | null
+          streak_losses_before?: number | null
+          streak_wins_before?: number | null
           strike_price: number
+          symbol?: string
+          target_pct?: number | null
+          trade_log?: Json
+          trade_result?: string | null
         }
         Update: {
           entry_price?: number
@@ -118,10 +157,19 @@ export type Database = {
           nifty_spot?: number | null
           option_type?: string
           pnl?: number | null
+          pnl_pct?: number | null
+          position_qty?: number | null
           round?: number
           session_id?: string
           status?: string
+          stop_loss_pct?: number | null
+          streak_losses_before?: number | null
+          streak_wins_before?: number | null
           strike_price?: number
+          symbol?: string
+          target_pct?: number | null
+          trade_log?: Json
+          trade_result?: string | null
         }
         Relationships: [
           {

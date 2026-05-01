@@ -110,6 +110,418 @@ async function fetchNiftyOptionChain(supabaseUrl: string, anonKey: string, strik
   } catch (error) { console.error("Option chain error:", error); return { optionData: null, specificPrice: null, specificInstrumentKey: null }; }
 }
 
+/** Minimum closed trades per segment before treating stats as actionable in daily reports */
+const ANALYSIS_MIN_SEGMENT = 5;
+const ANALYSIS_MIN_GLOBAL = 8;
+
+function getSessionBucketIST(d: Date): string {
+  const ist = new Date(d.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+  const m = ist.getHours() * 60 + ist.getMinutes();
+  if (m < 9 * 60 + 15) return 'pre_open';
+  if (m < 10 * 60 + 30) return 'open_morning';
+  if (m < 11 * 60 + 20) return 'late_morning';
+  if (m < 14 * 60 + 30) return 'midday_gap';
+  if (m < 15 * 60 + 20) return 'afternoon';
+  return 'close';
+}
+
+async function getStreakBeforeEntry(supabase: any, beforeIso: string): Promise<{ streak_wins_before: number; streak_losses_before: number }> {
+  const { data } = await supabase
+    .from('martingale_trades')
+    .select('pnl')
+    .eq('status', 'closed')
+    .not('exit_time', 'is', null)
+    .lt('exit_time', beforeIso)
+    .order('exit_time', { ascending: false })
+    .limit(120);
+
+  if (!data?.length) return { streak_wins_before: 0, streak_losses_before: 0 };
+
+  const first = Number(data[0].pnl) || 0;
+  if (first === 0) return { streak_wins_before: 0, streak_losses_before: 0 };
+
+  const wins = first > 0;
+  let n = 0;
+  for (const t of data) {
+    const p = Number(t.pnl) || 0;
+    if (wins && p > 0) n++;
+    else if (!wins && p < 0) n++;
+    else break;
+  }
+  return wins
+    ? { streak_wins_before: n, streak_losses_before: 0 }
+    : { streak_wins_before: 0, streak_losses_before: n };
+}
+
+async function fetchSessionSpotTrail(supabase: any, sessionId: string): Promise<number[]> {
+  const { data } = await supabase
+    .from('martingale_trades')
+    .select('nifty_spot')
+    .eq('session_id', sessionId)
+    .order('entry_time', { ascending: true });
+  return (data || []).map((t: any) => Number(t.nifty_spot)).filter((s: number) => s > 0);
+}
+
+function computeNiftyRangePts(spots: number[], currentSpot: number): number | null {
+  if (spots.length === 0) return null;
+  const all = [...spots, currentSpot].filter((s) => s > 0);
+  if (!all.length) return null;
+  return Math.max(...all) - Math.min(...all);
+}
+
+function classifyTrendVsAtm(spot: number, atmStrike: number): 'up' | 'down' | 'sideways' {
+  const rel = atmStrike ? (spot - atmStrike) / atmStrike : 0;
+  if (Math.abs(rel) < 0.00035) return 'sideways';
+  return rel > 0 ? 'up' : 'down';
+}
+
+function buildEntryMarketSnapshot(
+  niftySpot: number,
+  atmStrike: number,
+  priorSessionSpots: number[],
+): {
+  trend: 'up' | 'down' | 'sideways';
+  nifty_range_session_pts: number | null;
+  atr_proxy_pts: number | null;
+  spot_vs_atm_pts: number;
+  session_bucket_ist: string;
+  rsi_14: null;
+  ema_vwap_relation: string;
+  volume_spike: null;
+} {
+  return {
+    trend: classifyTrendVsAtm(niftySpot, atmStrike),
+    nifty_range_session_pts: computeNiftyRangePts(priorSessionSpots, niftySpot),
+    atr_proxy_pts: computeNiftyRangePts(priorSessionSpots, niftySpot),
+    spot_vs_atm_pts: Number((niftySpot - atmStrike).toFixed(2)),
+    session_bucket_ist: getSessionBucketIST(new Date()),
+    rsi_14: null,
+    ema_vwap_relation: 'unknown',
+    volume_spike: null,
+  };
+}
+
+async function insertMartingaleOpenTrade(
+  supabase: any,
+  p: {
+    session_id: string;
+    round: number;
+    option_type: string;
+    strike_price: number;
+    lots: number;
+    entry_price: number;
+    nifty_spot: number;
+    atm_strike: number;
+    symbol?: string;
+    entry_reason_tag: string;
+  },
+): Promise<{ error: any | null }> {
+  const entryTimeIso = new Date().toISOString();
+  const streak = await getStreakBeforeEntry(supabase, entryTimeIso);
+  const priorSpots = await fetchSessionSpotTrail(supabase, p.session_id);
+  const market = buildEntryMarketSnapshot(p.nifty_spot, p.atm_strike, priorSpots);
+  const symbol = p.symbol || 'NIFTY';
+  const positionQty = p.lots * LOT_SIZE;
+
+  const trade_log = {
+    schema_version: 1,
+    entry: {
+      timestamp: entryTimeIso,
+      symbol,
+      trade_side: `${p.option_type}` as string,
+      strike_price: p.strike_price,
+      martingale_step: p.round,
+      target_pct_snapshot: PROFIT_TARGET,
+      stop_loss_pct_snapshot: LOSS_LIMIT,
+      target_pct_ui: `%+${PROFIT_TARGET} TP / -${LOSS_LIMIT}% SL on premium`,
+      market,
+      entry_reason_rule_tag: p.entry_reason_tag,
+      notes: 'RSI/VWAP not wired to live feed yet (null/unknown placeholders).',
+    },
+  };
+
+  const { error } = await supabase.from('martingale_trades').insert({
+    session_id: p.session_id,
+    round: p.round,
+    option_type: p.option_type,
+    strike_price: p.strike_price,
+    lots: p.lots,
+    entry_price: p.entry_price,
+    status: 'open',
+    nifty_spot: p.nifty_spot,
+    symbol,
+    target_pct: PROFIT_TARGET,
+    stop_loss_pct: LOSS_LIMIT,
+    position_qty: positionQty,
+    streak_wins_before: streak.streak_wins_before,
+    streak_losses_before: streak.streak_losses_before,
+    trade_log,
+  });
+  return { error };
+}
+
+function finalizeTradeClosePatch(
+  openTrade: any,
+  exitPrice: number,
+  exitTimeIso: string,
+  pnlAmount: number,
+  closeReason: string,
+): Record<string, unknown> {
+  const entryPx = Number(openTrade.entry_price) || 0;
+  const pnlPctPremium = entryPx > 0 ? ((exitPrice - entryPx) / entryPx) * 100 : 0;
+  const trade_result = pnlAmount > 0 ? 'win' : pnlAmount < 0 ? 'loss' : 'breakeven';
+  const prevLog =
+    typeof openTrade.trade_log === 'object' && openTrade.trade_log != null ? { ...openTrade.trade_log } : {};
+
+  return {
+    status: 'closed',
+    exit_price: exitPrice,
+    exit_time: exitTimeIso,
+    pnl: pnlAmount,
+    trade_result,
+    pnl_pct: Number(pnlPctPremium.toFixed(4)),
+    trade_log: {
+      ...prevLog,
+      exit: {
+        timestamp: exitTimeIso,
+        exit_price: exitPrice,
+        close_reason: closeReason,
+        pnl_inr: pnlAmount,
+        pnl_pct_on_premium: Number(pnlPctPremium.toFixed(4)),
+        trade_result,
+      },
+    },
+  };
+}
+
+function istTradingDayUtcRange(ymd: string): { startIso: string; endIso: string } {
+  return {
+    startIso: `${ymd}T00:00:00.000+05:30`,
+    endIso: `${ymd}T23:59:59.999+05:30`,
+  };
+}
+
+async function persistDailyAnalysisReport(supabase: any, tradingDayYmd: string, report: Record<string, unknown>) {
+  await supabase.from('martingale_daily_reports').upsert(
+    { trading_day: tradingDayYmd, report },
+    { onConflict: 'trading_day' },
+  );
+}
+
+async function computeMartingaleDailyAnalysis(
+  supabase: any,
+  tradingDayYmd: string,
+): Promise<Record<string, unknown>> {
+  const { startIso, endIso } = istTradingDayUtcRange(tradingDayYmd);
+  const { data: trades, error } = await supabase
+    .from('martingale_trades')
+    .select('id, round, option_type, pnl, entry_price, exit_price, exit_time, trade_result, trade_log, pnl_pct')
+    .eq('status', 'closed')
+    .gte('exit_time', startIso)
+    .lte('exit_time', endIso)
+    .order('exit_time', { ascending: true });
+
+  if (error) throw error;
+
+  const rows = trades || [];
+  const closedWithPnl = rows.filter((t: any) => t.pnl != null && t.exit_time);
+  const n = closedWithPnl.length;
+
+  const wins = closedWithPnl.filter((t: any) => Number(t.pnl) > 0);
+  const losses = closedWithPnl.filter((t: any) => Number(t.pnl) < 0);
+  const winRatePct = n > 0 ? (100 * wins.length) / n : 0;
+
+  const avgWin = wins.length ? wins.reduce((s: number, t: any) => s + Number(t.pnl), 0) / wins.length : 0;
+
+  let peak = 0;
+  let cum = 0;
+  let maxDd = 0;
+  let runLoss = 0;
+  let maxLossStreak = 0;
+  for (const t of closedWithPnl) {
+    const p = Number(t.pnl);
+    cum += p;
+    if (cum > peak) peak = cum;
+    const dd = peak - cum;
+    if (dd > maxDd) maxDd = dd;
+    if (p < 0) {
+      runLoss++;
+      if (runLoss > maxLossStreak) maxLossStreak = runLoss;
+    } else {
+      runLoss = 0;
+    }
+  }
+
+  const pnlByRound: Record<string, number> = {};
+  for (const t of closedWithPnl) {
+    const r = String(t.round ?? '?');
+    pnlByRound[r] = (pnlByRound[r] ?? 0) + Number(t.pnl);
+  }
+
+  function segmentCounts(keyFn: (t: any) => string): Record<string, { wins: number; losses: number; pnl: number }> {
+    const m: Record<string, { wins: number; losses: number; pnl: number }> = {};
+    for (const t of closedWithPnl) {
+      const key = keyFn(t) || 'unknown';
+      if (!m[key]) m[key] = { wins: 0, losses: 0, pnl: 0 };
+      const p = Number(t.pnl);
+      if (p > 0) m[key].wins++;
+      else if (p < 0) m[key].losses++;
+      m[key].pnl += p;
+    }
+    return m;
+  }
+
+  function winRate(seg: { wins: number; losses: number }) {
+    const tot = seg.wins + seg.losses;
+    return tot > 0 ? (100 * seg.wins) / tot : null;
+  }
+
+  const bySessionBucket = segmentCounts((t: any) => {
+    const b = (t.trade_log as any)?.entry?.market?.session_bucket_ist;
+    return typeof b === 'string' ? b : 'unknown';
+  });
+
+  const byTrend = segmentCounts((t: any) => {
+    const tr = (t.trade_log as any)?.entry?.market?.trend;
+    return typeof tr === 'string' ? tr : 'unknown';
+  });
+
+  const byRoundSeg = segmentCounts((t: any) => `R${t.round ?? '?'}`);
+
+  const volatilityBuckets = segmentCounts((t: any) => {
+    const r = (t.trade_log as any)?.entry?.market?.atr_proxy_pts;
+    if (r == null || Number.isNaN(Number(r))) return 'unknown_vol';
+    const v = Number(r);
+    if (v < 30) return 'low_range_lt30';
+    if (v < 60) return 'mid_range_30_60';
+    return 'high_range_gte60';
+  });
+
+  /** Segments meeting win-rate floor with enough samples */
+  const outperformingBuckets: string[] = [];
+  const underperformingBuckets: string[] = [];
+  for (const [k, seg] of Object.entries(bySessionBucket)) {
+    const tot = seg.wins + seg.losses;
+    if (tot < ANALYSIS_MIN_SEGMENT) continue;
+    const wr = winRate(seg)!;
+    if (wr >= 55) outperformingBuckets.push(`${k}:${wr.toFixed(1)}% (${tot} trades)`);
+    if (wr < 45) underperformingBuckets.push(`${k}:${wr.toFixed(1)}% (${tot} trades)`);
+  }
+
+  type RiskTier = 'high' | 'medium' | 'low';
+  const roundRiskMap: Record<string, { tier: RiskTier; pnl: number; count: number; note: string }> = {};
+
+  function tierFor(_roundKey: string, pnlAgg: number, count: number): RiskTier {
+    if (pnlAgg < -50_000 && count >= 3) return 'high';
+    if (pnlAgg < -20_000 && count >= 2) return 'medium';
+    if (Math.abs(pnlAgg) >= 5000 || count >= 4) return 'medium';
+    return 'low';
+  }
+
+  const roundKeys = new Set<number>();
+  for (const t of closedWithPnl) roundKeys.add(Number(t.round) || 0);
+  const sortedRounds = [...roundKeys].sort((a, b) => a - b);
+
+  const riskWarnings: string[] = [];
+  for (const rk of sortedRounds) {
+    const key = `R${rk}`;
+    const agg = closedWithPnl
+      .filter((t: any) => Number(t.round) === rk)
+      .reduce((s: number, t: any) => s + Number(t.pnl), 0);
+    const ct = closedWithPnl.filter((t: any) => Number(t.round) === rk).length;
+    const tier = tierFor(key, agg, ct);
+    roundRiskMap[key] = {
+      tier,
+      pnl: agg,
+      count: ct,
+      note: tier !== 'low' ? 'Monitor exposure on this martingale depth' : 'Within normal exploratory risk',
+    };
+    const lossRate = ct > 0 ? (100 * closedWithPnl.filter((t: any) => Number(t.round) === rk && Number(t.pnl) < 0).length) / ct : 0;
+    if (rk >= 3 && ct >= 3 && lossRate >= 66) {
+      riskWarnings.push(
+        `${key}: ${lossRate.toFixed(0)}% losses over ${ct} exits — evaluate capping martingale depth or widening skips.`,
+      );
+    }
+  }
+
+  const segmentsForReport = Object.fromEntries(
+    Object.entries({ bySessionBucket, byTrend, byRound: byRoundSeg, volatilityBuckets }).map(([nm, mm]) => {
+      const condensed: Record<string, unknown> = {};
+      for (const [k, seg] of Object.entries(mm)) {
+        const tot = seg.wins + seg.losses;
+        condensed[k] = {
+          trades: tot,
+          win_rate_pct: tot ? winRate(seg) : null,
+          net_pnl: Number(seg.pnl.toFixed(0)),
+          sufficient_sample: tot >= ANALYSIS_MIN_SEGMENT,
+        };
+      }
+      return [nm, condensed];
+    }),
+  );
+
+  const suggestions: string[] = [];
+  if (n < ANALYSIS_MIN_GLOBAL) {
+    suggestions.push(`Only ${n} closed trades on ${tradingDayYmd}: wait for ≥${ANALYSIS_MIN_GLOBAL} samples before tuning thresholds aggressively.`);
+  } else if (sortedRounds.length && roundRiskMap[`R${Math.max(...sortedRounds)}`]?.tier === 'high') {
+    suggestions.push('Deepest martingale step aggregates large negative PnL — consider hard-capping rounds at 3 or tightening sideways gate.');
+  }
+
+  const lateMorning = bySessionBucket['late_morning'];
+  if (lateMorning && lateMorning.wins + lateMorning.losses >= ANALYSIS_MIN_SEGMENT && (winRate(lateMorning)! < 42)) {
+    suggestions.push(`Session bucket late_morning under ${winRate(lateMorning)!.toFixed(0)}% win rate (${lateMorning.wins + lateMorning.losses} trades) — consider paper-testing a narrower entry window before live changes.`);
+  }
+
+  const lowVol = volatilityBuckets.low_range_lt30;
+  if (
+    lowVol &&
+    lowVol.wins + lowVol.losses >= ANALYSIS_MIN_SEGMENT &&
+    winRate(lowVol)! > 58
+  ) {
+    suggestions.push('Low intra-session range bucket shows higher win rate — validate on more days before using as a standalone filter.');
+  }
+
+  const insights: string[] = [`Win rate ${winRatePct.toFixed(1)}% over ${n} exits (median sample rule: segments need ≥${ANALYSIS_MIN_SEGMENT} trades).`];
+  insights.push(`Max drawdown ₹${Math.round(maxDd)} (mark-to-trade cumulative on closed legs).`);
+
+  const globalWinPass = winRatePct >= 55 && n >= ANALYSIS_MIN_GLOBAL;
+
+  return {
+    trading_day: tradingDayYmd,
+    summary: {
+      trade_count_closed: n,
+      wins: wins.length,
+      losses: losses.length,
+      breakevens: closedWithPnl.length - wins.length - losses.length,
+      win_rate_pct: Number(winRatePct.toFixed(2)),
+      avg_win_inr: Number(avgWin.toFixed(2)),
+      avg_loss_inr: losses.length
+        ? Number((losses.reduce((s: number, t: any) => s + Number(t.pnl), 0) / losses.length).toFixed(2))
+        : 0,
+      max_drawdown_inr: Number(maxDd.toFixed(2)),
+      max_losing_streak: maxLossStreak,
+      pnl_by_martingale_step: pnlByRound,
+      round_risk: roundRiskMap,
+    },
+    segmented: segmentsForReport,
+    outperforming_buckets: outperformingBuckets,
+    underperforming_buckets: underperformingBuckets,
+    insights,
+    suggested_actions: suggestions,
+    risk_warnings:
+      riskWarnings.length > 0
+        ? riskWarnings
+        : n >= ANALYSIS_MIN_GLOBAL && !globalWinPass
+          ? ['Win rate or sample strength does not justify increasing size or widening martingale — favor stability.',]
+          : [],
+    methodology_notes: [
+      'Do not change live risk constants from ≤2 sessions of data.',
+      'RSI/VWAP placeholders are null until wired from a candles feed.',
+      `Analysis minimums: segment=${ANALYSIS_MIN_SEGMENT}, global=${ANALYSIS_MIN_GLOBAL} trades.`,
+    ],
+  };
+}
+
 async function getUpstoxToken(supabase: any): Promise<string | null> {
   const { data: token } = await supabase
     .from('upstox_tokens')
@@ -555,15 +967,17 @@ async function shouldSkipNextRound(
   // Check premium decay vs anchors
   let strongDoubleDecay = false, mildDoubleDecay = false;
   let decayDetail = '';
-  if (currentCEPrice > 0 && currentPEPrice > 0) {
+  const cePx = currentCEPrice ?? 0;
+  const pePx = currentPEPrice ?? 0;
+  if (cePx > 0 && pePx > 0) {
     const { anchorCE, anchorPE } = await getSessionPremiumAnchors(supabase, sessionId, allSessionTrades);
     if (anchorCE && anchorPE && anchorCE > MIN_OPTION_PREMIUM && anchorPE > MIN_OPTION_PREMIUM) {
-      const ceRatio = currentCEPrice / anchorCE;
-      const peRatio = currentPEPrice / anchorPE;
+      const ceRatio = cePx / anchorCE;
+      const peRatio = pePx / anchorPE;
       strongDoubleDecay = (ceRatio < SIDEWAYS_PREMIUM_DECAY_STRONG && peRatio < SIDEWAYS_PREMIUM_DECAY_STRONG);
       mildDoubleDecay   = (ceRatio < SIDEWAYS_PREMIUM_DECAY_WEAK   && peRatio < SIDEWAYS_PREMIUM_DECAY_WEAK);
-      decayDetail = `CE ₹${anchorCE.toFixed(0)}→₹${currentCEPrice.toFixed(0)} (${((1-ceRatio)*100).toFixed(1)}%), ` +
-                    `PE ₹${anchorPE.toFixed(0)}→₹${currentPEPrice.toFixed(0)} (${((1-peRatio)*100).toFixed(1)}%)`;
+      decayDetail = `CE ₹${anchorCE.toFixed(0)}→₹${cePx.toFixed(0)} (${((1-ceRatio)*100).toFixed(1)}%), ` +
+                    `PE ₹${anchorPE.toFixed(0)}→₹${pePx.toFixed(0)} (${((1-peRatio)*100).toFixed(1)}%)`;
     }
   }
 
@@ -582,7 +996,7 @@ async function shouldSkipNextRound(
     };
   }
   // Safety: extreme scenario
-  if ((!currentCEPrice || !currentPEPrice) && niftyRange < 15) {
+  if ((!cePx || !pePx) && niftyRange < 15) {
     return {
       skip: true,
       reason: `R${nextRound}: No price data + very low range (${niftyRange.toFixed(0)} pts).`,
@@ -619,21 +1033,24 @@ async function isInSidewaysPause(
     return { paused: true, remainingMins };
   }
 
-  // Pause expired — recheck conditions (NEW)
-  const nextRound = 3; // assume we are about to enter R3 after pause
-  const { skip, reason } = await shouldSkipNextRound(
-    supabase, sessionId, nextRound,
-    niftySpot, supabaseUrl, anonKey,
-    currentCEPrice, currentPEPrice
+  // Pause expired — recheck conditions
+  const nextRound = 3;
+  const { skip } = await shouldSkipNextRound(
+    supabase,
+    sessionId,
+    nextRound,
+    niftySpot,
+    supabaseUrl,
+    anonKey,
+    currentCEPrice,
+    currentPEPrice,
   );
 
   if (skip) {
-    // Extend pause (NEW)
     await setSidewaysPause(supabase);
     return { paused: true, remainingMins: Math.ceil(SIDEWAYS_PAUSE_DURATION_MS / 60000) };
   }
 
-  // Conditions cleared — exit pause
   await supabase.from('bot_settings').delete().eq('key', 'sideways_pause_until');
   return { paused: false, remainingMins: 0 };
 }
@@ -857,16 +1274,20 @@ async function continueSessionFromLastLoss(
     total_pnl: sessionTotalPnl,
   }).eq('id', session.id);
 
-  await supabase.from('martingale_trades').insert({
+  const { error: insErr } = await insertMartingaleOpenTrade(supabase, {
     session_id: session.id,
     round: newRound,
     option_type: newOptionType,
     strike_price: newStrike,
     lots: newLots,
     entry_price: actualRoundPrice,
-    status: 'open',
     nifty_spot: optionData.niftySpot,
+    atm_strike: optionData.atmStrike,
+    entry_reason_tag: 'martingale_flip_after_loss_round',
   });
+  if (insErr) {
+    console.error('insertMartingaleOpenTrade:', insErr);
+  }
 
   const action = `${modeLabel} 🔄 Round ${newRound}: Resumed from last loss. Flipped to ${newLots} lots ${newStrike} ${newOptionType} @ ₹${actualRoundPrice.toFixed(2)}`;
   return {
@@ -982,7 +1403,16 @@ serve(async (req) => {
       }
       // Also check sideways pause (no active session but bot is paused between sessions)
       if (!pauseInfo.paused && !activeSession) {
-        const sidewaysPauseCheck = await isInSidewaysPause(supabase);
+        const { optionData: statusOd } = await fetchNiftyOptionChain(supabaseUrl, anonKey);
+        const sidewaysPauseCheck = await isInSidewaysPause(
+          supabase,
+          activeSession?.id ?? '',
+          statusOd?.niftySpot ?? 0,
+          supabaseUrl,
+          anonKey,
+          statusOd?.otmCEPrice,
+          statusOd?.otmPEPrice,
+        );
         if (sidewaysPauseCheck.paused) {
           const { data: spData } = await supabase.from('bot_settings').select('value').eq('key', 'sideways_pause_until').maybeSingle();
           pauseInfo = { paused: true, pause_until: spData?.value, reason: 'Sideways market detected — waiting for movement' };
@@ -1049,9 +1479,10 @@ serve(async (req) => {
               }
             }
 
-            await supabase.from('martingale_trades').update({
-              status: 'closed', exit_price: exitPrice, pnl, exit_time: new Date().toISOString(),
-            }).eq('id', openTrade.id);
+            const exitIso = new Date().toISOString();
+            await supabase.from('martingale_trades').update(
+              finalizeTradeClosePatch(openTrade, exitPrice, exitIso, pnl, 'manual_stop'),
+            ).eq('id', openTrade.id);
 
             await supabase.from('martingale_sessions').update({
               status: 'stopped', total_pnl: activeSession.total_pnl + pnl, completed_at: new Date().toISOString(),
@@ -1083,7 +1514,14 @@ serve(async (req) => {
 
     if (action === 'force_stop_all') {
       // Bulk stop all active/paused sessions without P&L calculation (for cleanup)
-      await supabase.from('martingale_trades').update({ status: 'closed', exit_time: new Date().toISOString() }).eq('status', 'open');
+      const { data: openForce } = await supabase.from('martingale_trades').select('*').eq('status', 'open');
+      const exitIsoF = new Date().toISOString();
+      for (const t of openForce || []) {
+        const ep = Number(t.entry_price) || 0;
+        await supabase.from('martingale_trades').update(
+          finalizeTradeClosePatch(t, ep, exitIsoF, 0, 'force_stop_all'),
+        ).eq('id', t.id);
+      }
       await supabase.from('martingale_sessions').update({ status: 'stopped', completed_at: new Date().toISOString() }).eq('status', 'active');
       await supabase.from('martingale_sessions').update({ status: 'stopped', completed_at: new Date().toISOString() }).eq('status', 'paused');
       await supabase.from('bot_settings').delete().eq('key', 'sideways_pause_until');
@@ -1093,6 +1531,23 @@ serve(async (req) => {
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       });
     }
+
+    if (action === 'daily_analysis') {
+      let ymd = typeof body.trading_day === 'string' ? body.trading_day.trim() : '';
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(ymd)) {
+        const ist = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+        if (!body.use_today) ist.setDate(ist.getDate() - 1);
+        ymd = `${ist.getFullYear()}-${String(ist.getMonth() + 1).padStart(2, '0')}-${String(ist.getDate()).padStart(2, '0')}`;
+      }
+      const report = await computeMartingaleDailyAnalysis(supabase, ymd);
+      if (body.persist !== false) {
+        await persistDailyAnalysisReport(supabase, ymd, report as Record<string, unknown>);
+      }
+      return new Response(JSON.stringify({ success: true, trading_day: ymd, report }), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+
     if (action === 'start') {
       const tradingMode = body.trading_mode || 'paper';
       const maxRounds = Math.min(Math.max(parseInt(body.max_rounds) || DEFAULT_MAX_ROUNDS, 1), 10);
@@ -1140,7 +1595,7 @@ serve(async (req) => {
 
       // Check for sideways pause before starting
       if (!skipDecayCheck) {
-        const sidewaysPause = await isInSidewaysPause(supabase);
+        const sidewaysPause = await isInSidewaysPause(supabase, '', 0, '', '');
         if (sidewaysPause.paused) {
           return new Response(JSON.stringify({ 
             success: false, 
@@ -1284,13 +1739,18 @@ serve(async (req) => {
         .single();
       if (sessErr) throw sessErr;
 
-      const { error: tradeErr } = await supabase
-        .from('martingale_trades')
-        .insert({
-          session_id: session.id, round: 1, option_type: entryOptionType,
-          strike_price: entryStrike, lots: 1,
-          entry_price: actualEntryPrice, status: 'open', nifty_spot: optionData.niftySpot,
-        });
+      const startTag = lastSession ? 'session_start_carry_direction_from_prior' : 'session_start_first_trend_ce_pe';
+      const { error: tradeErr } = await insertMartingaleOpenTrade(supabase, {
+        session_id: session.id,
+        round: 1,
+        option_type: entryOptionType,
+        strike_price: entryStrike,
+        lots: 1,
+        entry_price: actualEntryPrice,
+        nifty_spot: optionData.niftySpot,
+        atm_strike: optionData.atmStrike,
+        entry_reason_tag: startTag,
+      });
       if (tradeErr) throw tradeErr;
 
       await supabase.from('bot_settings').upsert({ key: 'bot_running', value: 'true', updated_at: new Date().toISOString() }, { onConflict: 'key' });
@@ -1348,7 +1808,16 @@ serve(async (req) => {
            (!isExpiryDay && schedTime >= AUTO_START_2 && schedTime < AUTO_START_2 + 1))) {
         if (!existingSession) {
           // Check for sideways pause before auto-starting
-          const sidewaysPause = await isInSidewaysPause(supabase);
+          const { optionData: cronOd } = await fetchNiftyOptionChain(supabaseUrl, anonKey);
+          const sidewaysPause = await isInSidewaysPause(
+            supabase,
+            '',
+            cronOd?.niftySpot ?? 0,
+            supabaseUrl,
+            anonKey,
+            cronOd?.otmCEPrice,
+            cronOd?.otmPEPrice,
+          );
           let shouldStart = true;
 
           if (sidewaysPause.paused) {
@@ -1490,9 +1959,10 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
               }
             }
 
-            await supabase.from('martingale_trades').update({
-              status: 'closed', exit_price: exitPrice, pnl: sqPnl, exit_time: new Date().toISOString(),
-            }).eq('id', openTradeOutside.id);
+            const exitIsoW = new Date().toISOString();
+            await supabase.from('martingale_trades').update(
+              finalizeTradeClosePatch(openTradeOutside, exitPrice, exitIsoW, sqPnl, 'window_close_midday_or_gap'),
+            ).eq('id', openTradeOutside.id);
 
             await supabase.from('martingale_sessions').update({
               status: 'squared_off', total_pnl: activeOutside.total_pnl + sqPnl, completed_at: new Date().toISOString(),
@@ -1577,8 +2047,17 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
         .maybeSingle();
       
       const hadSidewaysPause = !!rawPauseData?.value;
-      const sidewaysPause = await isInSidewaysPause(supabase);
-      
+      const { optionData: tickDecayOd } = await fetchNiftyOptionChain(supabaseUrl, anonKey);
+      const sidewaysPause = await isInSidewaysPause(
+        supabase,
+        '',
+        tickDecayOd?.niftySpot ?? 0,
+        supabaseUrl,
+        anonKey,
+        tickDecayOd?.otmCEPrice,
+        tickDecayOd?.otmPEPrice,
+      );
+
       if (sidewaysPause.paused) {
         return { success: true, message: `⚠️ Sideways pause: ${sidewaysPause.remainingMins} min remaining. Will restart as fresh R1.` };
       }
@@ -1749,14 +2228,16 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
           // Close any open trades on the duplicate
           const { data: dupTrades } = await supabase
             .from('martingale_trades')
-            .select('id')
+            .select('*')
             .eq('session_id', dup.id)
             .eq('status', 'open');
           if (dupTrades) {
+            const exitIsoDup = new Date().toISOString();
             for (const t of dupTrades) {
-              await supabase.from('martingale_trades').update({
-                status: 'closed', exit_time: new Date().toISOString(),
-              }).eq('id', t.id);
+              const ep = Number(t.entry_price) || 0;
+              await supabase.from('martingale_trades').update(
+                finalizeTradeClosePatch(t, ep, exitIsoDup, 0, 'duplicate_session_cleanup'),
+              ).eq('id', t.id);
             }
           }
           await supabase.from('martingale_sessions').update({
@@ -1853,9 +2334,10 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
         }
       }
 
-      await supabase.from('martingale_trades').update({
-        status: 'closed', exit_price: exitPrice, pnl: sqPnl, exit_time: new Date().toISOString(),
-      }).eq('id', openTrade.id);
+      const exitIsoSq = new Date().toISOString();
+      await supabase.from('martingale_trades').update(
+        finalizeTradeClosePatch(openTrade, exitPrice, exitIsoSq, sqPnl, 'square_off_1525_ist'),
+      ).eq('id', openTrade.id);
 
       await supabase.from('martingale_sessions').update({
         status: 'squared_off', total_pnl: activeSession.total_pnl + sqPnl, completed_at: new Date().toISOString(),
@@ -1898,9 +2380,10 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
         }
       }
 
-      await supabase.from('martingale_trades').update({
-        status: 'closed', exit_price: checkPrice, pnl: checkPnlAmount, exit_time: new Date().toISOString(),
-      }).eq('id', openTrade.id);
+      const exitIsoDl = new Date().toISOString();
+      await supabase.from('martingale_trades').update(
+        finalizeTradeClosePatch(openTrade, checkPrice, exitIsoDl, checkPnlAmount, 'daily_loss_limit'),
+      ).eq('id', openTrade.id);
 
       const finalSessionPnl = runningSessionPnl + checkPnlAmount;
       await supabase.from('martingale_sessions').update({
@@ -1959,7 +2442,7 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
       }
 
       // GUARD 4: Check sideways pause
-      const sidewaysPause = await isInSidewaysPause(supabase);
+      const sidewaysPause = await isInSidewaysPause(supabase, '', 0, '', '');
       if (sidewaysPause.paused) {
         console.log(`New session skipped: sideways pause active (${sidewaysPause.remainingMins} min remaining)`);
         return;
@@ -2038,20 +2521,28 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
         .select()
         .single();
       if (newSession) {
-        await supabase.from('martingale_trades').insert({
-          session_id: newSession.id, round: 1, option_type: newDirection,
-          strike_price: newStrike, lots: 1,
-          entry_price: actualNewPrice, status: 'open', nifty_spot: optionData.niftySpot,
+        const { error: newSessTradeErr } = await insertMartingaleOpenTrade(supabase, {
+          session_id: newSession.id,
+          round: 1,
+          option_type: newDirection,
+          strike_price: newStrike,
+          lots: 1,
+          entry_price: actualNewPrice,
+          nifty_spot: optionData.niftySpot,
+          atm_strike: optionData.atmStrike,
+          entry_reason_tag: 'fresh_r1_after_take_profit_auto_chain',
         });
+        if (newSessTradeErr) console.error('insertMartingaleOpenTrade new session:', newSessTradeErr);
         console.log(`New session: ${newDirection} ${newStrike} @ ₹${actualNewPrice} (lastPnl=${lastPnl.toFixed(0)})`);
       }
     }
 
     // Check profit target
     if (pnlPercent >= PROFIT_TARGET) {
-      const { data: closeResult } = await supabase.from('martingale_trades').update({
-        status: 'closed', exit_price: currentPrice, pnl: pnlAmount, exit_time: new Date().toISOString(),
-      }).eq('id', openTrade.id).eq('status', 'open').select();
+      const exitIsoTp = new Date().toISOString();
+      const { data: closeResult } = await supabase.from('martingale_trades').update(
+        finalizeTradeClosePatch(openTrade, currentPrice, exitIsoTp, pnlAmount, 'profit_target_pct'),
+      ).eq('id', openTrade.id).eq('status', 'open').select();
       if (!closeResult || closeResult.length === 0) {
         return { success: true, message: 'Trade already processed by another tick' };
       }
@@ -2079,9 +2570,10 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
     }
     // Check loss limit
     else if (pnlPercent <= -LOSS_LIMIT) {
-      const { data: closeResult } = await supabase.from('martingale_trades').update({
-        status: 'closed', exit_price: currentPrice, pnl: pnlAmount, exit_time: new Date().toISOString(),
-      }).eq('id', openTrade.id).eq('status', 'open').select();
+      const exitIsoSl = new Date().toISOString();
+      const { data: closeResult } = await supabase.from('martingale_trades').update(
+        finalizeTradeClosePatch(openTrade, currentPrice, exitIsoSl, pnlAmount, 'stop_loss_pct'),
+      ).eq('id', openTrade.id).eq('status', 'open').select();
       if (!closeResult || closeResult.length === 0) {
         return { success: true, message: 'Trade already processed by another tick' };
       }
