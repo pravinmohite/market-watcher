@@ -48,6 +48,34 @@ function fmtIst(iso: string) {
   }
 }
 
+/** IST weekday label → offset from Monday (Mon=0 … Sun=6). */
+function istMondayContaining(anchorYmd: string): string {
+  const ms = Date.parse(`${anchorYmd}T12:00:00+05:30`);
+  const label = new Intl.DateTimeFormat("en-US", { timeZone: "Asia/Kolkata", weekday: "short" }).format(new Date(ms));
+  const map: Record<string, number> = { Mon: 0, Tue: 1, Wed: 2, Thu: 3, Fri: 4, Sat: 5, Sun: 6 };
+  const dow = map[label] ?? 0;
+  const monMs = ms - dow * 86400000;
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(monMs));
+}
+
+function weekEndFromMondayIst(monYmd: string): string {
+  const monMs = Date.parse(`${monYmd}T12:00:00+05:30`);
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit" }).format(
+    new Date(monMs + 6 * 86400000),
+  );
+}
+
+/** Default anchor: calendar week that ended last Sunday → its Monday YMD (IST). */
+function previousCompletedWeekMondayDefault(): string {
+  const ist = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
+  const ymd = `${ist.getFullYear()}-${String(ist.getMonth() + 1).padStart(2, "0")}-${String(ist.getDate()).padStart(2, "0")}`;
+  const thisMon = istMondayContaining(ymd);
+  const thisMonMs = Date.parse(`${thisMon}T12:00:00+05:30`);
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit" }).format(
+    new Date(thisMonMs - 7 * 86400000),
+  );
+}
+
 const MartingaleAnalytics = () => {
   const queryClient = useQueryClient();
   const [analysisDay, setAnalysisDay] = useState(() => {
@@ -58,6 +86,10 @@ const MartingaleAnalytics = () => {
     const day = String(d.getDate()).padStart(2, "0");
     return `${y}-${m}-${day}`;
   });
+
+  const [weekAnchorDay, setWeekAnchorDay] = useState(previousCompletedWeekMondayDefault);
+  const weekStartIst = useMemo(() => istMondayContaining(weekAnchorDay), [weekAnchorDay]);
+  const weekEndIst = useMemo(() => weekEndFromMondayIst(weekStartIst), [weekStartIst]);
 
   const { data: ticks = [], isLoading: ticksLoading } = useQuery({
     queryKey: ["martingale-premium-ticks"],
@@ -104,6 +136,25 @@ const MartingaleAnalytics = () => {
     },
   });
 
+  const { data: weeklyReports = [], isLoading: weeklyReportsLoading } = useQuery({
+    queryKey: ["martingale-weekly-reports"],
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from("martingale_weekly_reports" as never)
+        .select("id, week_start, week_end, report, created_at")
+        .order("week_start", { ascending: false })
+        .limit(24);
+      if (error) throw error;
+      return (data || []) as {
+        id: string;
+        week_start: string;
+        week_end: string;
+        report: Record<string, unknown>;
+        created_at: string;
+      }[];
+    },
+  });
+
   const runAnalysis = useMutation({
     mutationFn: async () => {
       const { data, error } = await supabase.functions.invoke("martingale-bot", {
@@ -120,6 +171,24 @@ const MartingaleAnalytics = () => {
       }
     },
     onError: () => toast.error("Could not run daily_analysis"),
+  });
+
+  const runWeeklyAnalysis = useMutation({
+    mutationFn: async () => {
+      const { data, error } = await supabase.functions.invoke("martingale-bot", {
+        body: { action: "weekly_analysis", week_start: weekStartIst, persist: true },
+      });
+      if (error) throw error;
+      return data as { success?: boolean; report?: unknown; error?: string; week_start?: string; week_end?: string };
+    },
+    onSuccess: (d) => {
+      if (d?.success === false) toast.error(d?.error || "Weekly analysis failed");
+      else {
+        toast.success(`Weekly analysis saved (${d?.week_start ?? weekStartIst} → ${d?.week_end ?? weekEndIst})`);
+        queryClient.invalidateQueries({ queryKey: ["martingale-weekly-reports"] });
+      }
+    },
+    onError: () => toast.error("Could not run weekly_analysis"),
   });
 
   const ticksWithDelta = useMemo(() => {
@@ -147,7 +216,7 @@ const MartingaleAnalytics = () => {
             <BarChart3 className="w-5 h-5 text-primary shrink-0" />
             <div className="min-w-0">
               <h1 className="text-base font-semibold truncate">Martingale analytics & logs</h1>
-              <p className="text-xs text-muted-foreground truncate">Premium ticks, trades, daily reports</p>
+              <p className="text-xs text-muted-foreground truncate">Premium ticks, trades, daily &amp; weekly reports</p>
             </div>
           </div>
           <Button variant="outline" size="sm" asChild>
@@ -204,6 +273,7 @@ const MartingaleAnalytics = () => {
                 size="sm"
                 onClick={() => {
                   queryClient.invalidateQueries({ queryKey: ["martingale-daily-reports"] });
+                  queryClient.invalidateQueries({ queryKey: ["martingale-weekly-reports"] });
                   queryClient.invalidateQueries({ queryKey: ["martingale-premium-ticks"] });
                   queryClient.invalidateQueries({ queryKey: ["martingale-trades-analytics"] });
                 }}
@@ -215,11 +285,38 @@ const MartingaleAnalytics = () => {
           </CardHeader>
         </Card>
 
+        <Card>
+          <CardHeader className="flex flex-col sm:flex-row sm:items-end gap-3">
+            <div>
+              <CardTitle className="text-base">Weekly analysis (IST Mon–Sun)</CardTitle>
+              <CardDescription>
+                Pick any day — the bot normalizes to the <strong>Monday</strong> that starts that IST week ({weekStartIst} → {weekEndIst}). After{" "}
+                <strong>2–3 days</strong> of CE/PE ticks and closed trades, re-run to surface pattern-based notes in{" "}
+                <em>expert review</em> (education only).
+              </CardDescription>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <input
+                type="date"
+                value={weekAnchorDay}
+                onChange={(e) => setWeekAnchorDay(e.target.value)}
+                className="text-sm rounded-md border border-input bg-background px-2 py-1.5"
+              />
+              <Button size="sm" onClick={() => runWeeklyAnalysis.mutate()} disabled={runWeeklyAnalysis.isPending} className="gap-1">
+                <Sparkles className="w-3.5 h-3.5" />
+                Run week &amp; save
+              </Button>
+            </div>
+          </CardHeader>
+        </Card>
+
         <Tabs defaultValue="ticks">
           <TabsList className="flex-wrap h-auto gap-1">
             <TabsTrigger value="ticks">CE/PE ticks ({ticks.length})</TabsTrigger>
             <TabsTrigger value="trades">Trades ({trades.length})</TabsTrigger>
-            <TabsTrigger value="reports">Daily reports ({reports.length})</TabsTrigger>
+            <TabsTrigger value="reports">
+              Reports ({reports.length} · {weeklyReports.length})
+            </TabsTrigger>
           </TabsList>
 
           <TabsContent value="ticks" className="mt-4">
@@ -349,9 +446,13 @@ const MartingaleAnalytics = () => {
             </Card>
           </TabsContent>
 
-          <TabsContent value="reports" className="mt-4">
+          <TabsContent value="reports" className="mt-4 space-y-8">
             <Card>
-              <CardContent className="pt-4">
+              <CardHeader className="pb-2">
+                <CardTitle className="text-sm font-medium">Daily reports</CardTitle>
+                <CardDescription className="text-xs">Saved from the daily analysis card above.</CardDescription>
+              </CardHeader>
+              <CardContent>
                 <div className="max-h-[560px] overflow-auto rounded-md border">
                   <Table>
                     <TableHeader>
@@ -394,6 +495,87 @@ const MartingaleAnalytics = () => {
                               </TableCell>
                               <TableCell className="text-[11px] text-muted-foreground max-w-md">
                                 {warnings?.length ? warnings.join("; ") : "—"}
+                              </TableCell>
+                            </TableRow>
+                          );
+                        })
+                      )}
+                    </TableBody>
+                  </Table>
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader className="pb-2">
+                <CardTitle className="text-sm font-medium">Weekly reports</CardTitle>
+                <CardDescription className="text-xs">
+                  IST week roll-up with <code className="text-[10px]">expert_review</code> (options-style notes from win/loss structure, weekday
+                  clusters, martingale depth, tick density). Minimum history: prefer several active days before changing parameters.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="max-h-[560px] overflow-auto rounded-md border">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Week (Mon → Sun)</TableHead>
+                        <TableHead className="text-right">Days</TableHead>
+                        <TableHead className="text-right">Trades</TableHead>
+                        <TableHead className="text-right">Win %</TableHead>
+                        <TableHead className="text-right">Net ₹</TableHead>
+                        <TableHead className="text-right">Max DD ₹</TableHead>
+                        <TableHead className="text-right text-xs">CE/PE ticks</TableHead>
+                        <TableHead className="text-xs min-w-[280px]">Expert review</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {weeklyReportsLoading ? (
+                        <TableRow>
+                          <TableCell colSpan={8} className="text-muted-foreground">
+                            Loading…
+                          </TableCell>
+                        </TableRow>
+                      ) : weeklyReports.length === 0 ? (
+                        <TableRow>
+                          <TableCell colSpan={8} className="text-muted-foreground">
+                            No weekly rows yet. Apply migration <code className="text-xs">martingale_weekly_reports</code>, deploy the edge
+                            function, then use <strong>Run week &amp; save</strong> above.
+                          </TableCell>
+                        </TableRow>
+                      ) : (
+                        weeklyReports.map((wr) => {
+                          const summary = wr.report?.summary as
+                            | {
+                                distinct_trading_days?: number;
+                                trade_count_closed?: number;
+                                win_rate_pct?: number;
+                                net_pnl_inr?: number;
+                                max_drawdown_inr?: number;
+                                premium_tick_snapshots?: number;
+                              }
+                            | undefined;
+                          const expert = wr.report?.expert_review as string[] | undefined;
+                          const excerpt = expert?.length ? expert.slice(0, 3).join(" · ") : "—";
+                          return (
+                            <TableRow key={wr.id}>
+                              <TableCell className="font-medium text-xs whitespace-nowrap">
+                                {wr.week_start} → {wr.week_end}
+                              </TableCell>
+                              <TableCell className="text-right">{summary?.distinct_trading_days ?? "—"}</TableCell>
+                              <TableCell className="text-right">{summary?.trade_count_closed ?? "—"}</TableCell>
+                              <TableCell className="text-right">
+                                {summary?.win_rate_pct != null ? `${Number(summary.win_rate_pct).toFixed(1)}%` : "—"}
+                              </TableCell>
+                              <TableCell className={`text-right font-mono text-xs ${(summary?.net_pnl_inr ?? 0) < 0 ? "text-loss" : ""}`}>
+                                {summary?.net_pnl_inr != null ? Number(summary.net_pnl_inr).toFixed(0) : "—"}
+                              </TableCell>
+                              <TableCell className="text-right font-mono text-xs">
+                                {summary?.max_drawdown_inr != null ? Number(summary.max_drawdown_inr).toFixed(0) : "—"}
+                              </TableCell>
+                              <TableCell className="text-right text-xs">{summary?.premium_tick_snapshots ?? "—"}</TableCell>
+                              <TableCell className="text-[11px] text-muted-foreground align-top max-w-xl" title={expert?.join("\n")}>
+                                {excerpt}
                               </TableCell>
                             </TableRow>
                           );

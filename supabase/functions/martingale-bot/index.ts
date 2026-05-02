@@ -347,6 +347,147 @@ function istTradingDayUtcRange(ymd: string): { startIso: string; endIso: string 
   };
 }
 
+/** IST calendar helpers (India has no DST; use Asia/Kolkata for labels). */
+function istMidnightMs(ymd: string): number {
+  return Date.parse(`${ymd}T00:00:00+05:30`);
+}
+
+function istYmdFromMs(ms: number): string {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit' })
+    .format(new Date(ms));
+}
+
+function weekdayMon0Sun6Ist(ms: number): number {
+  const label = new Intl.DateTimeFormat('en-US', { timeZone: 'Asia/Kolkata', weekday: 'short' }).format(new Date(ms));
+  const map: Record<string, number> = { Mon: 0, Tue: 1, Wed: 2, Thu: 3, Fri: 4, Sat: 5, Sun: 6 };
+  return map[label] ?? 0;
+}
+
+/** Monday YYYY-MM-DD (IST week) containing `anchorYmd`. */
+function mondayYmdContainingIst(anchorYmd: string): string {
+  const ms = istMidnightMs(anchorYmd);
+  const dow = weekdayMon0Sun6Ist(ms);
+  return istYmdFromMs(ms - dow * 86400000);
+}
+
+/** Inclusive IST week Mon–Sun timestamps for Postgres filters. */
+function istWeekInclusiveRange(mondayYmd: string): { week_start: string; week_end: string; startIso: string; endIso: string } {
+  const monMs = istMidnightMs(mondayYmd);
+  const sunMs = monMs + 6 * 86400000;
+  const weekEnd = istYmdFromMs(sunMs);
+  return {
+    week_start: mondayYmd,
+    week_end: weekEnd,
+    startIso: `${mondayYmd}T00:00:00.000+05:30`,
+    endIso: `${weekEnd}T23:59:59.999+05:30`,
+  };
+}
+
+function previousCompletedWeekMondayYmd(): string {
+  const ist = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+  const ymd = `${ist.getFullYear()}-${String(ist.getMonth() + 1).padStart(2, '0')}-${String(ist.getDate()).padStart(2, '0')}`;
+  const thisMonday = mondayYmdContainingIst(ymd);
+  return istYmdFromMs(istMidnightMs(thisMonday) - 7 * 86400000);
+}
+
+const ANALYSIS_WEEK_MIN_TRADES = 15;
+
+function buildWeeklyExpertReview(args: {
+  n: number;
+  winRatePct: number;
+  maxDd: number;
+  distinctIstTradingDays: number;
+  avgWin: number;
+  avgLoss: number;
+  byWeekday: Record<string, { wins: number; losses: number; pnl: number }>;
+  byTrend: Record<string, { wins: number; losses: number; pnl: number }>;
+  pnlByRound: Record<string, number>;
+  premiumTickCount: number;
+}): string[] {
+  const lines: string[] = [];
+
+  if (args.distinctIstTradingDays < 3) {
+    lines.push(
+      `Only ${args.distinctIstTradingDays} distinct day(s) with exits this week — after 2–3 days of full logging, re-run weekly analysis; avoid changing live parameters from a thin week.`,
+    );
+  }
+  if (args.n < 8) {
+    lines.push(
+      `${args.n} closed trades in the window — directional stats are noisy; targeting ≥${ANALYSIS_WEEK_MIN_TRADES} weekly exits improves confidence before optimizing for profit.`,
+    );
+  } else if (args.n < ANALYSIS_WEEK_MIN_TRADES) {
+    lines.push(`Sample size ${args.n} is usable for direction but still below ideal (${ANALYSIS_WEEK_MIN_TRADES}); confirm next week before aggressive rule changes.`);
+  }
+
+  if (args.avgWin > 0 && args.avgLoss < 0) {
+    const lossMag = Math.abs(args.avgLoss);
+    if (lossMag > args.avgWin * 1.45) {
+      lines.push(
+        'Average loser is materially larger than average winner — typical for leveraged martingale. Favor tightening max rounds / daily loss cap over adding size until loss distribution compresses.',
+      );
+    }
+  }
+
+  let worstWd: { k: string; wr: number; n: number } | null = null;
+  for (const [k, seg] of Object.entries(args.byWeekday)) {
+    const tot = seg.wins + seg.losses;
+    if (tot < 4) continue;
+    const wr = (100 * seg.wins) / tot;
+    if (!worstWd || wr < worstWd.wr) worstWd = { k, wr, n: tot };
+  }
+  if (worstWd && worstWd.wr < 43) {
+    lines.push(
+      `Weakest weekday cluster: ${worstWd.k} (~${worstWd.wr.toFixed(0)}% win / ${worstWd.n} trades). If this repeats next week, test skipping bot auto-starts on that weekday profile.`,
+    );
+  }
+
+  const sid = args.byTrend['sideways'];
+  if (sid) {
+    const tot = sid.wins + sid.losses;
+    if (tot >= 6 && (100 * sid.wins) / tot < 44) {
+      lines.push(
+        'Entries tagged sideways trend underperform versus other buckets — aligns with premium decay in chop; your R3+ sideways gate may deserve more weight, not less.',
+      );
+    }
+  }
+
+  const roundKeys = Object.keys(args.pnlByRound).map((k) => Number(k)).filter((x) => !Number.isNaN(x)).sort((a, b) => b - a);
+  if (roundKeys.length && roundKeys[0] >= 4) {
+    const deep = roundKeys.filter((r) => r >= 4);
+    let agg = 0;
+    for (const r of deep) agg += args.pnlByRound[String(r)] ?? 0;
+    if (agg < -2500 && deep.length > 0) {
+      lines.push(
+        'Deep martingale rounds (R4+) contribute disproportionate drag — explicitly cap rounds or require stronger directional filter before increasing depth.',
+      );
+    }
+  }
+
+  if (args.premiumTickCount >= 30) {
+    lines.push(
+      `Rich premium-tick tape (${args.premiumTickCount} snapshots) — in Analytics → Ticks, watch simultaneous CE/PE bleed vs one leg holding bid into spot moves before loss clusters.`,
+    );
+  } else if (args.premiumTickCount < 8 && args.n >= 5) {
+    lines.push('Few CE/PE tick snapshots versus trade count — keep UI/cron ticking during open positions so weekly review can corroborate decay vs breakout narratives.');
+  }
+
+  if (args.winRatePct < 47 && args.n >= 12) {
+    lines.push(
+      subWeekWinRateReminder(args.winRatePct),
+    );
+  }
+
+  lines.push(
+    'Options caveat: buying OTM carries negative theta — high win-rate targets alone can hide bleed from gap/martingale bursts; prioritize survival (drawdown, round depth) over squeezing extra target %.',
+  );
+
+  return lines;
+}
+
+function subWeekWinRateReminder(wr: number): string {
+  return `Week win rate ~${wr.toFixed(1)}% on sufficient sample — revisit take-profit tightness vs stop only after 2 comparable weeks; do not widen martingale blindly to chase positive expectancy.`;
+}
+
 async function persistDailyAnalysisReport(supabase: any, tradingDayYmd: string, report: Record<string, unknown>) {
   await supabase.from('martingale_daily_reports').upsert(
     { trading_day: tradingDayYmd, report },
@@ -564,6 +705,175 @@ async function computeMartingaleDailyAnalysis(
       'Do not change live risk constants from ≤2 sessions of data.',
       'RSI/VWAP placeholders are null until wired from a candles feed.',
       `Analysis minimums: segment=${ANALYSIS_MIN_SEGMENT}, global=${ANALYSIS_MIN_GLOBAL} trades.`,
+    ],
+  };
+}
+
+async function persistWeeklyAnalysisReport(
+  supabase: any,
+  weekStart: string,
+  weekEnd: string,
+  report: Record<string, unknown>,
+) {
+  await supabase.from('martingale_weekly_reports').upsert(
+    { week_start: weekStart, week_end: weekEnd, report },
+    { onConflict: 'week_start' },
+  );
+}
+
+async function computeMartingaleWeeklyAnalysis(
+  supabase: any,
+  mondayYmdInput: string,
+): Promise<Record<string, unknown>> {
+  const weekMon = mondayYmdContainingIst(mondayYmdInput);
+  const { week_start, week_end, startIso, endIso } = istWeekInclusiveRange(weekMon);
+
+  const { data: trades, error } = await supabase
+    .from('martingale_trades')
+    .select('id, round, option_type, pnl, exit_time, trade_log')
+    .eq('status', 'closed')
+    .gte('exit_time', startIso)
+    .lte('exit_time', endIso)
+    .order('exit_time', { ascending: true });
+  if (error) throw error;
+
+  const closedWithPnl = (trades || []).filter((t: any) => t.pnl != null && t.exit_time);
+  const n = closedWithPnl.length;
+  const wins = closedWithPnl.filter((t: any) => Number(t.pnl) > 0);
+  const losses = closedWithPnl.filter((t: any) => Number(t.pnl) < 0);
+  const winRatePct = n > 0 ? (100 * wins.length) / n : 0;
+  const avgWin = wins.length ? wins.reduce((s: number, t: any) => s + Number(t.pnl), 0) / wins.length : 0;
+  const avgLoss = losses.length
+    ? losses.reduce((s: number, t: any) => s + Number(t.pnl), 0) / losses.length
+    : 0;
+
+  let peak = 0;
+  let cum = 0;
+  let maxDd = 0;
+  let runLoss = 0;
+  let maxLossStreak = 0;
+  const istDays = new Set<string>();
+  for (const t of closedWithPnl) {
+    const p = Number(t.pnl);
+    cum += p;
+    if (cum > peak) peak = cum;
+    maxDd = Math.max(maxDd, peak - cum);
+    if (p < 0) {
+      runLoss++;
+      maxLossStreak = Math.max(maxLossStreak, runLoss);
+    } else runLoss = 0;
+    istDays.add(
+      new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date(t.exit_time as string)),
+    );
+  }
+
+  const pnlByRound: Record<string, number> = {};
+  for (const t of closedWithPnl) {
+    const r = String(t.round ?? '?');
+    pnlByRound[r] = (pnlByRound[r] ?? 0) + Number(t.pnl);
+  }
+
+  function segmentCounts(keyFn: (t: any) => string): Record<string, { wins: number; losses: number; pnl: number }> {
+    const m: Record<string, { wins: number; losses: number; pnl: number }> = {};
+    for (const t of closedWithPnl) {
+      const key = keyFn(t) || 'unknown';
+      if (!m[key]) m[key] = { wins: 0, losses: 0, pnl: 0 };
+      const p = Number(t.pnl);
+      if (p > 0) m[key].wins++;
+      else if (p < 0) m[key].losses++;
+      m[key].pnl += p;
+    }
+    return m;
+  }
+
+  function winRate(seg: { wins: number; losses: number }) {
+    const tot = seg.wins + seg.losses;
+    return tot > 0 ? (100 * seg.wins) / tot : null;
+  }
+
+  const byWeekday = segmentCounts((t: any) =>
+    new Intl.DateTimeFormat('en-US', { timeZone: 'Asia/Kolkata', weekday: 'short' }).format(new Date(t.exit_time)),
+  );
+  const bySessionBucket = segmentCounts((t: any) => {
+    const b = (t.trade_log as any)?.entry?.market?.session_bucket_ist;
+    return typeof b === 'string' ? b : 'unknown';
+  });
+  const byTrend = segmentCounts((t: any) => {
+    const tr = (t.trade_log as any)?.entry?.market?.trend;
+    return typeof tr === 'string' ? tr : 'unknown';
+  });
+  const byRoundSeg = segmentCounts((t: any) => `R${t.round ?? '?'}`);
+  const volatilityBuckets = segmentCounts((t: any) => {
+    const r = (t.trade_log as any)?.entry?.market?.atr_proxy_pts;
+    if (r == null || Number.isNaN(Number(r))) return 'unknown_vol';
+    const v = Number(r);
+    if (v < 30) return 'low_range_lt30';
+    if (v < 60) return 'mid_range_30_60';
+    return 'high_range_gte60';
+  });
+
+  let premiumTickCount = 0;
+  const { count: tickCnt, error: tickErr } = await supabase
+    .from('martingale_premium_ticks')
+    .select('*', { count: 'exact', head: true })
+    .gte('recorded_at', startIso)
+    .lte('recorded_at', endIso);
+  if (!tickErr && typeof tickCnt === 'number') premiumTickCount = tickCnt;
+
+  const expert_review = buildWeeklyExpertReview({
+    n,
+    winRatePct,
+    maxDd,
+    distinctIstTradingDays: istDays.size,
+    avgWin,
+    avgLoss,
+    byWeekday,
+    byTrend,
+    pnlByRound,
+    premiumTickCount,
+  });
+
+  const segmentsCondensed = Object.fromEntries(
+    Object.entries({ byWeekday, bySessionBucket, byTrend, byRound: byRoundSeg, volatilityBuckets }).map(([nm, mm]) => {
+      const condensed: Record<string, unknown> = {};
+      for (const [k, seg] of Object.entries(mm)) {
+        const tot = seg.wins + seg.losses;
+        condensed[k] = {
+          trades: tot,
+          win_rate_pct: tot ? winRate(seg) : null,
+          net_pnl: Number(seg.pnl.toFixed(0)),
+          sufficient_sample: tot >= ANALYSIS_MIN_SEGMENT,
+        };
+      }
+      return [nm, condensed];
+    }),
+  );
+
+  const netWeekPnl = closedWithPnl.reduce((s: number, t: any) => s + Number(t.pnl), 0);
+
+  return {
+    period: { ist_week_start: week_start, ist_week_end: week_end },
+    summary: {
+      trade_count_closed: n,
+      distinct_trading_days: istDays.size,
+      wins: wins.length,
+      losses: losses.length,
+      win_rate_pct: Number(winRatePct.toFixed(2)),
+      net_pnl_inr: Number(netWeekPnl.toFixed(2)),
+      avg_win_inr: Number(avgWin.toFixed(2)),
+      avg_loss_inr: Number(avgLoss.toFixed(2)),
+      max_drawdown_inr: Number(maxDd.toFixed(2)),
+      max_losing_streak: maxLossStreak,
+      pnl_by_martingale_step: pnlByRound,
+      premium_tick_snapshots: premiumTickCount,
+    },
+    segmented: segmentsCondensed,
+    expert_review,
+    methodology_notes: [
+      'Weekly roll-up aggregates closes by IST exit timestamp across Mon–Sun; align your trading week to this boundary.',
+      'After 2–3 days of detailed logs, revisit expert_review weekly; corroborate with premium tick tab before rule changes.',
+      `Target ≥${ANALYSIS_WEEK_MIN_TRADES} weekly exits before aggressive optimization; segments still use min ${ANALYSIS_MIN_SEGMENT}.`,
+      'Education only — not financial advice.',
     ],
   };
 }
@@ -1587,6 +1897,29 @@ serve(async (req) => {
       return new Response(JSON.stringify({ success: true, trading_day: ymd, report }), {
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       });
+    }
+
+    if (action === 'weekly_analysis') {
+      let mon = typeof body.week_start === 'string' ? body.week_start.trim() : '';
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(mon)) {
+        mon = previousCompletedWeekMondayYmd();
+      } else {
+        mon = mondayYmdContainingIst(mon);
+      }
+      const report = await computeMartingaleWeeklyAnalysis(supabase, mon);
+      const period = report.period as { ist_week_start: string; ist_week_end: string };
+      if (body.persist !== false) {
+        await persistWeeklyAnalysisReport(supabase, period.ist_week_start, period.ist_week_end, report as Record<string, unknown>);
+      }
+      return new Response(
+        JSON.stringify({
+          success: true,
+          week_start: period.ist_week_start,
+          week_end: period.ist_week_end,
+          report,
+        }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
+      );
     }
 
     if (action === 'start') {
