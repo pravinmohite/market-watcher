@@ -114,6 +114,52 @@ async function fetchNiftyOptionChain(supabaseUrl: string, anonKey: string, strik
 const ANALYSIS_MIN_SEGMENT = 5;
 const ANALYSIS_MIN_GLOBAL = 8;
 
+/** Throttle DB writes: at most one snapshot per open trade per interval (UI/cron tick pacing ~15s). */
+const PREMIUM_TICK_MIN_INTERVAL_MS = 15_000;
+
+async function recordPremiumTickIfDue(
+  supabase: any,
+  params: {
+    sessionId: string;
+    tradeId: string;
+    niftySpot: number;
+    otmCEStrike: number;
+    otmPEStrike: number;
+    otmCEPremium: number;
+    otmPEPremium: number;
+    activeOptionType: string;
+    activeStrike: number;
+    activePremium: number;
+    tickSource: string;
+  },
+): Promise<void> {
+  const cutoffIso = new Date(Date.now() - PREMIUM_TICK_MIN_INTERVAL_MS).toISOString();
+  const { data: recent } = await supabase
+    .from('martingale_premium_ticks')
+    .select('id')
+    .eq('trade_id', params.tradeId)
+    .gte('recorded_at', cutoffIso)
+    .limit(1)
+    .maybeSingle();
+
+  if (recent) return;
+
+  const { error } = await supabase.from('martingale_premium_ticks').insert({
+    session_id: params.sessionId,
+    trade_id: params.tradeId,
+    nifty_spot: params.niftySpot,
+    otm_ce_strike: params.otmCEStrike,
+    otm_pe_strike: params.otmPEStrike,
+    otm_ce_premium: params.otmCEPremium,
+    otm_pe_premium: params.otmPEPremium,
+    active_option_type: params.activeOptionType,
+    active_strike: params.activeStrike,
+    active_premium: params.activePremium,
+    tick_source: params.tickSource,
+  });
+  if (error) console.error('martingale_premium_ticks:', error);
+}
+
 function getSessionBucketIST(d: Date): string {
   const ist = new Date(d.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
   const m = ist.getHours() * 60 + ist.getMinutes();
@@ -2351,12 +2397,35 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
     const dailyPnlCheck = await getDailyPnl(supabase);
     const dailyLossLimitCheck = await getDailyLossLimit(supabase);
     const runningSessionPnl = activeSession.total_pnl;
-    const { specificPrice: checkPrice, specificInstrumentKey: checkInstrKey } = await fetchNiftyOptionChain(
-      supabaseUrl, anonKey, openTrade.strike_price, openTrade.option_type, openTrade.nifty_spot, openTrade.entry_price
+    const { optionData: odMon, specificPrice: checkPrice, specificInstrumentKey: checkInstrKey } = await fetchNiftyOptionChain(
+      supabaseUrl, anonKey, openTrade.strike_price, openTrade.option_type, openTrade.nifty_spot, openTrade.entry_price,
     );
 
     if (checkPrice === null) {
       return { success: true, message: 'Could not fetch current price' };
+    }
+
+    if (
+      odMon &&
+      typeof odMon.otmCEPrice === 'number' &&
+      typeof odMon.otmPEPrice === 'number' &&
+      odMon.otmCEPrice > 0 &&
+      odMon.otmPEPrice > 0
+    ) {
+      // Fire-and-forget: do not await — logging must not delay TP/SL/daily-limit logic.
+      void recordPremiumTickIfDue(supabase, {
+        sessionId: activeSession.id,
+        tradeId: openTrade.id,
+        niftySpot: odMon.niftySpot,
+        otmCEStrike: odMon.otmCEStrike,
+        otmPEStrike: odMon.otmPEStrike,
+        otmCEPremium: odMon.otmCEPrice,
+        otmPEPremium: odMon.otmPEPrice,
+        activeOptionType: openTrade.option_type,
+        activeStrike: Number(openTrade.strike_price),
+        activePremium: checkPrice,
+        tickSource: source,
+      }).catch((e) => console.error('recordPremiumTickIfDue:', e));
     }
 
     const checkPnlAmount = (checkPrice - openTrade.entry_price) * openTrade.lots * LOT_SIZE;

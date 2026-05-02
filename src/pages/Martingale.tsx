@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
-import { Play, Square, RefreshCw, Zap, TrendingUp, TrendingDown, ArrowLeftRight, AlertTriangle, DollarSign, Activity, ArrowLeft, Link2, Unlink, Calendar, Filter, LogOut } from "lucide-react";
+import { Play, Square, RefreshCw, Zap, TrendingUp, TrendingDown, ArrowLeftRight, AlertTriangle, DollarSign, Activity, ArrowLeft, Link2, Unlink, Calendar, Filter, LogOut, BarChart3 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -320,6 +320,14 @@ const Martingale = () => {
                   {activeSession.trading_mode === 'actual' ? '🔴 LIVE' : '📝 Paper'}
                 </span>
               )}
+              <Link
+                to="/martingale/analytics"
+                className="inline-flex items-center gap-1 text-[11px] sm:text-xs font-medium text-primary hover:underline px-1 sm:px-2"
+                title="Tables: CE/PE premium ticks, trades, daily reports"
+              >
+                <BarChart3 className="w-3.5 h-3.5 shrink-0" />
+                Analytics
+              </Link>
               {isActive ? (
                 <>
                   <Button onClick={() => tickBot.mutate()} disabled={tickBot.isPending} variant="outline" size="sm" className="gap-1 md:gap-1.5 h-8 px-2 md:px-3 text-xs">

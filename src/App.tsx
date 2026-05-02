@@ -7,6 +7,7 @@ import { useEffect, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import Index from "./pages/Index";
 import Martingale from "./pages/Martingale";
+import MartingaleAnalytics from "./pages/MartingaleAnalytics";
 import StockAnalysis from "./pages/StockAnalysis";
 import Login from "./pages/Login";
 import NotFound from "./pages/NotFound";
@@ -47,6 +48,7 @@ const App = () => (
           <Route path="/" element={<Index />} />
           <Route path="/stock-analysis" element={<StockAnalysis />} />
           <Route path="/martingale" element={<ProtectedRoute><Martingale /></ProtectedRoute>} />
+          <Route path="/martingale/analytics" element={<ProtectedRoute><MartingaleAnalytics /></ProtectedRoute>} />
           {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
           <Route path="*" element={<NotFound />} />
         </Routes>

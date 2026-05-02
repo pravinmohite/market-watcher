@@ -1,0 +1,414 @@
+import { useMemo, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Link } from "react-router-dom";
+import { supabase } from "@/integrations/supabase/client";
+import { ArrowLeft, BarChart3, RefreshCw, Sparkles } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { toast } from "sonner";
+
+type PremiumTick = {
+  id: string;
+  recorded_at: string;
+  nifty_spot: number;
+  otm_ce_strike: number | null;
+  otm_pe_strike: number | null;
+  otm_ce_premium: number | null;
+  otm_pe_premium: number | null;
+  active_option_type: string;
+  active_strike: number;
+  active_premium: number;
+  trade_id: string;
+  tick_source: string;
+};
+
+type TradeRow = {
+  id: string;
+  session_id: string;
+  round: number;
+  option_type: string;
+  strike_price: number;
+  entry_price: number;
+  exit_price: number | null;
+  entry_time: string;
+  exit_time: string | null;
+  pnl: number | null;
+  status: string;
+  trade_result: string | null;
+  trade_log: unknown;
+};
+
+function fmtIst(iso: string) {
+  try {
+    return new Date(iso).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
+  } catch {
+    return iso;
+  }
+}
+
+const MartingaleAnalytics = () => {
+  const queryClient = useQueryClient();
+  const [analysisDay, setAnalysisDay] = useState(() => {
+    const d = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
+    d.setDate(d.getDate() - 1);
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return `${y}-${m}-${day}`;
+  });
+
+  const { data: ticks = [], isLoading: ticksLoading } = useQuery({
+    queryKey: ["martingale-premium-ticks"],
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from("martingale_premium_ticks" as never)
+        .select(
+          "id, recorded_at, nifty_spot, otm_ce_strike, otm_pe_strike, otm_ce_premium, otm_pe_premium, active_option_type, active_strike, active_premium, trade_id, tick_source",
+        )
+        .order("recorded_at", { ascending: false })
+        .limit(400);
+      if (error) throw error;
+      return (data || []) as PremiumTick[];
+    },
+    refetchInterval: 30_000,
+  });
+
+  const { data: trades = [], isLoading: tradesLoading } = useQuery({
+    queryKey: ["martingale-trades-analytics"],
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from("martingale_trades" as never)
+        .select(
+          "id, session_id, round, option_type, strike_price, entry_price, exit_price, entry_time, exit_time, pnl, status, trade_result, trade_log",
+        )
+        .order("entry_time", { ascending: false })
+        .limit(150);
+      if (error) throw error;
+      return (data || []) as TradeRow[];
+    },
+    refetchInterval: 60_000,
+  });
+
+  const { data: reports = [], isLoading: reportsLoading } = useQuery({
+    queryKey: ["martingale-daily-reports"],
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from("martingale_daily_reports" as never)
+        .select("id, trading_day, report, created_at")
+        .order("trading_day", { ascending: false })
+        .limit(45);
+      if (error) throw error;
+      return (data || []) as { id: string; trading_day: string; report: Record<string, unknown>; created_at: string }[];
+    },
+  });
+
+  const runAnalysis = useMutation({
+    mutationFn: async () => {
+      const { data, error } = await supabase.functions.invoke("martingale-bot", {
+        body: { action: "daily_analysis", trading_day: analysisDay, persist: true },
+      });
+      if (error) throw error;
+      return data as { success?: boolean; report?: unknown; error?: string };
+    },
+    onSuccess: (d) => {
+      if (d?.success === false) toast.error(d?.error || "Analysis failed");
+      else {
+        toast.success(`Daily analysis saved for ${analysisDay}`);
+        queryClient.invalidateQueries({ queryKey: ["martingale-daily-reports"] });
+      }
+    },
+    onError: () => toast.error("Could not run daily_analysis"),
+  });
+
+  const ticksWithDelta = useMemo(() => {
+    const asc = [...ticks].sort((a, b) => new Date(a.recorded_at).getTime() - new Date(b.recorded_at).getTime());
+    return asc.map((row, i) => {
+      const prev = i > 0 ? asc[i - 1] : null;
+      const dCe = prev && row.otm_ce_premium != null && prev.otm_ce_premium != null ? row.otm_ce_premium - prev.otm_ce_premium : null;
+      const dPe = prev && row.otm_pe_premium != null && prev.otm_pe_premium != null ? row.otm_pe_premium - prev.otm_pe_premium : null;
+      const dN = prev ? row.nifty_spot - prev.nifty_spot : null;
+      const spread = row.otm_ce_premium != null && row.otm_pe_premium != null ? row.otm_ce_premium - row.otm_pe_premium : null;
+      return { ...row, dCe, dPe, dN, spread };
+    });
+  }, [ticks]);
+
+  const ticksDisplay = useMemo(() => [...ticksWithDelta].reverse(), [ticksWithDelta]);
+
+  return (
+    <div className="min-h-screen bg-background">
+      <header className="border-b border-border sticky top-0 z-10 bg-background/85 backdrop-blur-xl">
+        <div className="container mx-auto px-4 py-3 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2 min-w-0">
+            <Link to="/martingale" className="text-muted-foreground hover:text-foreground shrink-0">
+              <ArrowLeft className="w-5 h-5" />
+            </Link>
+            <BarChart3 className="w-5 h-5 text-primary shrink-0" />
+            <div className="min-w-0">
+              <h1 className="text-base font-semibold truncate">Martingale analytics & logs</h1>
+              <p className="text-xs text-muted-foreground truncate">Premium ticks, trades, daily reports</p>
+            </div>
+          </div>
+          <Button variant="outline" size="sm" asChild>
+            <Link to="/martingale">Bot controls</Link>
+          </Button>
+        </div>
+      </header>
+
+      <main className="container mx-auto px-4 py-6 space-y-6">
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">How this helps (breakouts & losses)</CardTitle>
+            <CardDescription className="space-y-2 text-sm">
+              <p>
+                <strong>Premium ticks:</strong> Each row is a snapshot while a position is open — <strong>OTM CE and OTM PE</strong> premiums
+                from the same chain response as the bot, plus your <strong>active leg</strong> mark. Rows are written at most once per{" "}
+                <strong>15 seconds per open trade</strong> (when the bot gets a valid price). Ce/Pe deltas between rows show{" "}
+                <em>decay</em> vs <em>both rising</em> (often with spot direction).
+              </p>
+              <p>
+                <strong>Breakouts (manual read):</strong> There is no guaranteed “breakout detector” here — use ticks + Nifty Δ: e.g. CE and PE
+                both falling with flat Nifty ⇒ typical decay; sustained Nifty move with one side expanding faster ⇒ directional pressure. Pair
+                this with your daily report segments (trend bucket, time bucket) before changing rules.
+              </p>
+              <p>
+                <strong>Earlier logging:</strong> Trade open/close rows store <code className="text-xs">trade_log</code> (entry market snapshot,
+                exit reason) but <strong>did not</strong> store dual CE/PE every tick until now.
+              </p>
+            </CardDescription>
+          </CardHeader>
+        </Card>
+
+        <Card>
+          <CardHeader className="flex flex-col sm:flex-row sm:items-end gap-3">
+            <div>
+              <CardTitle className="text-base">Daily analysis</CardTitle>
+              <CardDescription>
+                Generate report for an IST calendar date (closed trades by <code className="text-xs">exit_time</code>).
+              </CardDescription>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <input
+                type="date"
+                value={analysisDay}
+                onChange={(e) => setAnalysisDay(e.target.value)}
+                className="text-sm rounded-md border border-input bg-background px-2 py-1.5"
+              />
+              <Button size="sm" onClick={() => runAnalysis.mutate()} disabled={runAnalysis.isPending} className="gap-1">
+                <Sparkles className="w-3.5 h-3.5" />
+                Run &amp; save
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  queryClient.invalidateQueries({ queryKey: ["martingale-daily-reports"] });
+                  queryClient.invalidateQueries({ queryKey: ["martingale-premium-ticks"] });
+                  queryClient.invalidateQueries({ queryKey: ["martingale-trades-analytics"] });
+                }}
+              >
+                <RefreshCw className="w-3.5 h-3.5 mr-1" />
+                Refresh tables
+              </Button>
+            </div>
+          </CardHeader>
+        </Card>
+
+        <Tabs defaultValue="ticks">
+          <TabsList className="flex-wrap h-auto gap-1">
+            <TabsTrigger value="ticks">CE/PE ticks ({ticks.length})</TabsTrigger>
+            <TabsTrigger value="trades">Trades ({trades.length})</TabsTrigger>
+            <TabsTrigger value="reports">Daily reports ({reports.length})</TabsTrigger>
+          </TabsList>
+
+          <TabsContent value="ticks" className="mt-4">
+            <Card>
+              <CardContent className="pt-4">
+                <div className="max-h-[560px] overflow-auto rounded-md border">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>IST time</TableHead>
+                        <TableHead className="text-right">Nifty</TableHead>
+                        <TableHead className="text-right">ΔNx</TableHead>
+                        <TableHead className="text-right">CE prem</TableHead>
+                        <TableHead className="text-right">ΔCE</TableHead>
+                        <TableHead className="text-right">PE prem</TableHead>
+                        <TableHead className="text-right">ΔPE</TableHead>
+                        <TableHead className="text-right">CE−PE</TableHead>
+                        <TableHead>Held</TableHead>
+                        <TableHead className="text-right">Held ₹</TableHead>
+                        <TableHead className="text-xs">src</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {ticksLoading ? (
+                        <TableRow>
+                          <TableCell colSpan={11} className="text-muted-foreground">
+                            Loading…
+                          </TableCell>
+                        </TableRow>
+                      ) : ticksDisplay.length === 0 ? (
+                        <TableRow>
+                          <TableCell colSpan={11} className="text-muted-foreground">
+                            No ticks yet. Opens require an active session and successful chain fetch; snapshots are throttled to ~15s per open
+                            trade.
+                          </TableCell>
+                        </TableRow>
+                      ) : (
+                        ticksDisplay.map((r) => (
+                          <TableRow key={r.id}>
+                            <TableCell className="whitespace-nowrap text-xs">{fmtIst(r.recorded_at)}</TableCell>
+                            <TableCell className="text-right font-mono text-xs">{Number(r.nifty_spot).toFixed(1)}</TableCell>
+                            <TableCell className="text-right font-mono text-xs">
+                              {r.dN != null ? r.dN.toFixed(1) : "—"}
+                            </TableCell>
+                            <TableCell className="text-right font-mono text-xs">
+                              {r.otm_ce_premium != null ? r.otm_ce_premium.toFixed(1) : "—"}
+                            </TableCell>
+                            <TableCell className="text-right font-mono text-xs">{r.dCe != null ? r.dCe.toFixed(2) : "—"}</TableCell>
+                            <TableCell className="text-right font-mono text-xs">
+                              {r.otm_pe_premium != null ? r.otm_pe_premium.toFixed(1) : "—"}
+                            </TableCell>
+                            <TableCell className="text-right font-mono text-xs">{r.dPe != null ? r.dPe.toFixed(2) : "—"}</TableCell>
+                            <TableCell className="text-right font-mono text-xs">
+                              {r.spread != null ? r.spread.toFixed(1) : "—"}
+                            </TableCell>
+                            <TableCell className="text-xs whitespace-nowrap">
+                              {r.active_option_type} {r.active_strike}
+                            </TableCell>
+                            <TableCell className="text-right font-mono text-xs">{r.active_premium.toFixed(2)}</TableCell>
+                            <TableCell className="text-[10px] text-muted-foreground">{r.tick_source}</TableCell>
+                          </TableRow>
+                        ))
+                      )}
+                    </TableBody>
+                  </Table>
+                </div>
+              </CardContent>
+            </Card>
+          </TabsContent>
+
+          <TabsContent value="trades" className="mt-4">
+            <Card>
+              <CardContent className="pt-4">
+                <div className="max-h-[560px] overflow-auto rounded-md border">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Entry (IST)</TableHead>
+                        <TableHead>R</TableHead>
+                        <TableHead>Leg</TableHead>
+                        <TableHead className="text-right">Strike</TableHead>
+                        <TableHead className="text-right">Entry ₹</TableHead>
+                        <TableHead className="text-right">Exit ₹</TableHead>
+                        <TableHead>Status</TableHead>
+                        <TableHead className="text-right">PnL ₹</TableHead>
+                        <TableHead>Trend @entry</TableHead>
+                        <TableHead className="text-xs max-w-[140px]">Entry tag</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {tradesLoading ? (
+                        <TableRow>
+                          <TableCell colSpan={10} className="text-muted-foreground">
+                            Loading…
+                          </TableCell>
+                        </TableRow>
+                      ) : (
+                        trades.map((t) => {
+                          const lg = (t.trade_log || {}) as {
+                            entry?: { market?: { trend?: string }; entry_reason_rule_tag?: string };
+                            exit?: { close_reason?: string };
+                          };
+                          return (
+                            <TableRow key={t.id}>
+                              <TableCell className="text-xs whitespace-nowrap">{fmtIst(t.entry_time)}</TableCell>
+                              <TableCell>{t.round}</TableCell>
+                              <TableCell className="text-xs">{t.option_type}</TableCell>
+                              <TableCell className="text-right">{t.strike_price}</TableCell>
+                              <TableCell className="text-right font-mono text-xs">{t.entry_price}</TableCell>
+                              <TableCell className="text-right font-mono text-xs">{t.exit_price ?? "—"}</TableCell>
+                              <TableCell className="text-xs">{t.status}</TableCell>
+                              <TableCell className={`text-right font-mono text-xs ${(t.pnl || 0) < 0 ? "text-loss" : ""}`}>
+                                {t.pnl != null ? t.pnl.toFixed(0) : "—"}
+                              </TableCell>
+                              <TableCell className="text-xs">{lg.entry?.market?.trend ?? "—"}</TableCell>
+                              <TableCell className="text-[10px] max-w-[200px] truncate" title={lg.entry?.entry_reason_rule_tag}>
+                                {lg.entry?.entry_reason_rule_tag ?? "—"}
+                              </TableCell>
+                            </TableRow>
+                          );
+                        })
+                      )}
+                    </TableBody>
+                  </Table>
+                </div>
+              </CardContent>
+            </Card>
+          </TabsContent>
+
+          <TabsContent value="reports" className="mt-4">
+            <Card>
+              <CardContent className="pt-4">
+                <div className="max-h-[560px] overflow-auto rounded-md border">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Trading day</TableHead>
+                        <TableHead className="text-right">Trades</TableHead>
+                        <TableHead className="text-right">Win %</TableHead>
+                        <TableHead className="text-right">Max DD ₹</TableHead>
+                        <TableHead className="text-xs max-w-[320px]">Sample warnings</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {reportsLoading ? (
+                        <TableRow>
+                          <TableCell colSpan={5} className="text-muted-foreground">
+                            Loading…
+                          </TableCell>
+                        </TableRow>
+                      ) : reports.length === 0 ? (
+                        <TableRow>
+                          <TableCell colSpan={5} className="text-muted-foreground">
+                            No saved reports. Pick a date above and Run & save.
+                          </TableCell>
+                        </TableRow>
+                      ) : (
+                        reports.map((rep) => {
+                          const summary = rep.report?.summary as
+                            | { trade_count_closed?: number; win_rate_pct?: number; max_drawdown_inr?: number }
+                            | undefined;
+                          const warnings = rep.report?.risk_warnings as string[] | undefined;
+                          return (
+                            <TableRow key={rep.id}>
+                              <TableCell className="font-medium">{rep.trading_day}</TableCell>
+                              <TableCell className="text-right">{summary?.trade_count_closed ?? "—"}</TableCell>
+                              <TableCell className="text-right">
+                                {summary?.win_rate_pct != null ? `${Number(summary.win_rate_pct).toFixed(1)}%` : "—"}
+                              </TableCell>
+                              <TableCell className="text-right font-mono text-xs">
+                                {summary?.max_drawdown_inr != null ? Number(summary.max_drawdown_inr).toFixed(0) : "—"}
+                              </TableCell>
+                              <TableCell className="text-[11px] text-muted-foreground max-w-md">
+                                {warnings?.length ? warnings.join("; ") : "—"}
+                              </TableCell>
+                            </TableRow>
+                          );
+                        })
+                      )}
+                    </TableBody>
+                  </Table>
+                </div>
+              </CardContent>
+            </Card>
+          </TabsContent>
+        </Tabs>
+      </main>
+    </div>
+  );
+};
+
+export default MartingaleAnalytics;

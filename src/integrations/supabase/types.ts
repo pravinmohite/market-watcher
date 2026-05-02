@@ -98,6 +98,69 @@ export type Database = {
         }
         Relationships: []
       }
+      martingale_premium_ticks: {
+        Row: {
+          active_option_type: string
+          active_premium: number
+          active_strike: number
+          id: string
+          nifty_spot: number
+          otm_ce_premium: number | null
+          otm_ce_strike: number | null
+          otm_pe_premium: number | null
+          otm_pe_strike: number | null
+          recorded_at: string
+          session_id: string
+          tick_source: string
+          trade_id: string
+        }
+        Insert: {
+          active_option_type: string
+          active_premium: number
+          active_strike: number
+          id?: string
+          nifty_spot: number
+          otm_ce_premium?: number | null
+          otm_ce_strike?: number | null
+          otm_pe_premium?: number | null
+          otm_pe_strike?: number | null
+          recorded_at?: string
+          session_id: string
+          tick_source?: string
+          trade_id: string
+        }
+        Update: {
+          active_option_type?: string
+          active_premium?: number
+          active_strike?: number
+          id?: string
+          nifty_spot?: number
+          otm_ce_premium?: number | null
+          otm_ce_strike?: number | null
+          otm_pe_premium?: number | null
+          otm_pe_strike?: number | null
+          recorded_at?: string
+          session_id?: string
+          tick_source?: string
+          trade_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "martingale_premium_ticks_session_id_fkey"
+            columns: ["session_id"]
+            isOneToOne: false
+            referencedRelation: "martingale_sessions"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "martingale_premium_ticks_trade_id_fkey"
+            columns: ["trade_id"]
+            isOneToOne: false
+            referencedRelation: "martingale_trades"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       martingale_trades: {
         Row: {
           entry_price: number
