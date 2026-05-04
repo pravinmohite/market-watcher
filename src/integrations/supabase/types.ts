@@ -35,48 +35,6 @@ export type Database = {
         }
         Relationships: []
       }
-      martingale_sessions: {
-        Row: {
-          anchor_otm_ce_premium: number | null
-          anchor_otm_pe_premium: number | null
-          completed_at: string | null
-          created_at: string
-          current_round: number
-          id: string
-          last_tick_at: string | null
-          max_rounds: number
-          status: string
-          total_pnl: number
-          trading_mode: string
-        }
-        Insert: {
-          anchor_otm_ce_premium?: number | null
-          anchor_otm_pe_premium?: number | null
-          completed_at?: string | null
-          created_at?: string
-          current_round?: number
-          id?: string
-          last_tick_at?: string | null
-          max_rounds?: number
-          status?: string
-          total_pnl?: number
-          trading_mode?: string
-        }
-        Update: {
-          anchor_otm_ce_premium?: number | null
-          anchor_otm_pe_premium?: number | null
-          completed_at?: string | null
-          created_at?: string
-          current_round?: number
-          id?: string
-          last_tick_at?: string | null
-          max_rounds?: number
-          status?: string
-          total_pnl?: number
-          trading_mode?: string
-        }
-        Relationships: []
-      }
       martingale_daily_reports: {
         Row: {
           created_at: string
@@ -95,30 +53,6 @@ export type Database = {
           id?: string
           report?: Json
           trading_day?: string
-        }
-        Relationships: []
-      }
-      martingale_weekly_reports: {
-        Row: {
-          created_at: string
-          id: string
-          report: Json
-          week_end: string
-          week_start: string
-        }
-        Insert: {
-          created_at?: string
-          id?: string
-          report?: Json
-          week_end: string
-          week_start: string
-        }
-        Update: {
-          created_at?: string
-          id?: string
-          report?: Json
-          week_end?: string
-          week_start?: string
         }
         Relationships: []
       }
@@ -185,6 +119,48 @@ export type Database = {
           },
         ]
       }
+      martingale_sessions: {
+        Row: {
+          anchor_otm_ce_premium: number | null
+          anchor_otm_pe_premium: number | null
+          completed_at: string | null
+          created_at: string
+          current_round: number
+          id: string
+          last_tick_at: string | null
+          max_rounds: number
+          status: string
+          total_pnl: number
+          trading_mode: string
+        }
+        Insert: {
+          anchor_otm_ce_premium?: number | null
+          anchor_otm_pe_premium?: number | null
+          completed_at?: string | null
+          created_at?: string
+          current_round?: number
+          id?: string
+          last_tick_at?: string | null
+          max_rounds?: number
+          status?: string
+          total_pnl?: number
+          trading_mode?: string
+        }
+        Update: {
+          anchor_otm_ce_premium?: number | null
+          anchor_otm_pe_premium?: number | null
+          completed_at?: string | null
+          created_at?: string
+          current_round?: number
+          id?: string
+          last_tick_at?: string | null
+          max_rounds?: number
+          status?: string
+          total_pnl?: number
+          trading_mode?: string
+        }
+        Relationships: []
+      }
       martingale_trades: {
         Row: {
           entry_price: number
@@ -202,8 +178,8 @@ export type Database = {
           session_id: string
           status: string
           stop_loss_pct: number | null
-          streak_losses_before: number
-          streak_wins_before: number
+          streak_losses_before: number | null
+          streak_wins_before: number | null
           strike_price: number
           symbol: string
           target_pct: number | null
@@ -226,8 +202,8 @@ export type Database = {
           session_id: string
           status?: string
           stop_loss_pct?: number | null
-          streak_losses_before?: number
-          streak_wins_before?: number
+          streak_losses_before?: number | null
+          streak_wins_before?: number | null
           strike_price: number
           symbol?: string
           target_pct?: number | null
@@ -250,8 +226,8 @@ export type Database = {
           session_id?: string
           status?: string
           stop_loss_pct?: number | null
-          streak_losses_before?: number
-          streak_wins_before?: number
+          streak_losses_before?: number | null
+          streak_wins_before?: number | null
           strike_price?: number
           symbol?: string
           target_pct?: number | null
@@ -267,6 +243,30 @@ export type Database = {
             referencedColumns: ["id"]
           },
         ]
+      }
+      martingale_weekly_reports: {
+        Row: {
+          created_at: string
+          id: string
+          report: Json
+          week_end: string
+          week_start: string
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          report?: Json
+          week_end: string
+          week_start: string
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          report?: Json
+          week_end?: string
+          week_start?: string
+        }
+        Relationships: []
       }
       stock_alerts: {
         Row: {
