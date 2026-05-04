@@ -35,6 +35,90 @@ export type Database = {
         }
         Relationships: []
       }
+      martingale_daily_reports: {
+        Row: {
+          created_at: string
+          id: string
+          report: Json
+          trading_day: string
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          report?: Json
+          trading_day: string
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          report?: Json
+          trading_day?: string
+        }
+        Relationships: []
+      }
+      martingale_premium_ticks: {
+        Row: {
+          active_option_type: string
+          active_premium: number
+          active_strike: number
+          id: string
+          nifty_spot: number
+          otm_ce_premium: number | null
+          otm_ce_strike: number | null
+          otm_pe_premium: number | null
+          otm_pe_strike: number | null
+          recorded_at: string
+          session_id: string
+          tick_source: string
+          trade_id: string
+        }
+        Insert: {
+          active_option_type: string
+          active_premium: number
+          active_strike: number
+          id?: string
+          nifty_spot: number
+          otm_ce_premium?: number | null
+          otm_ce_strike?: number | null
+          otm_pe_premium?: number | null
+          otm_pe_strike?: number | null
+          recorded_at?: string
+          session_id: string
+          tick_source?: string
+          trade_id: string
+        }
+        Update: {
+          active_option_type?: string
+          active_premium?: number
+          active_strike?: number
+          id?: string
+          nifty_spot?: number
+          otm_ce_premium?: number | null
+          otm_ce_strike?: number | null
+          otm_pe_premium?: number | null
+          otm_pe_strike?: number | null
+          recorded_at?: string
+          session_id?: string
+          tick_source?: string
+          trade_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "martingale_premium_ticks_session_id_fkey"
+            columns: ["session_id"]
+            isOneToOne: false
+            referencedRelation: "martingale_sessions"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "martingale_premium_ticks_trade_id_fkey"
+            columns: ["trade_id"]
+            isOneToOne: false
+            referencedRelation: "martingale_trades"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       martingale_sessions: {
         Row: {
           anchor_otm_ce_premium: number | null
@@ -88,10 +172,19 @@ export type Database = {
           nifty_spot: number | null
           option_type: string
           pnl: number | null
+          pnl_pct: number | null
+          position_qty: number | null
           round: number
           session_id: string
           status: string
+          stop_loss_pct: number | null
+          streak_losses_before: number | null
+          streak_wins_before: number | null
           strike_price: number
+          symbol: string
+          target_pct: number | null
+          trade_log: Json
+          trade_result: string | null
         }
         Insert: {
           entry_price: number
@@ -103,10 +196,19 @@ export type Database = {
           nifty_spot?: number | null
           option_type: string
           pnl?: number | null
+          pnl_pct?: number | null
+          position_qty?: number | null
           round: number
           session_id: string
           status?: string
+          stop_loss_pct?: number | null
+          streak_losses_before?: number | null
+          streak_wins_before?: number | null
           strike_price: number
+          symbol?: string
+          target_pct?: number | null
+          trade_log?: Json
+          trade_result?: string | null
         }
         Update: {
           entry_price?: number
@@ -118,10 +220,19 @@ export type Database = {
           nifty_spot?: number | null
           option_type?: string
           pnl?: number | null
+          pnl_pct?: number | null
+          position_qty?: number | null
           round?: number
           session_id?: string
           status?: string
+          stop_loss_pct?: number | null
+          streak_losses_before?: number | null
+          streak_wins_before?: number | null
           strike_price?: number
+          symbol?: string
+          target_pct?: number | null
+          trade_log?: Json
+          trade_result?: string | null
         }
         Relationships: [
           {
@@ -132,6 +243,30 @@ export type Database = {
             referencedColumns: ["id"]
           },
         ]
+      }
+      martingale_weekly_reports: {
+        Row: {
+          created_at: string
+          id: string
+          report: Json
+          week_end: string
+          week_start: string
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          report?: Json
+          week_end: string
+          week_start: string
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          report?: Json
+          week_end?: string
+          week_start?: string
+        }
+        Relationships: []
       }
       stock_alerts: {
         Row: {
