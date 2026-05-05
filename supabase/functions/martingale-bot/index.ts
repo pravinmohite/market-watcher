@@ -32,6 +32,28 @@ const SIDEWAYS_PAUSE_DURATION_MS = 15 * 60 * 1000;
 const SIDEWAYS_MIN_ROUND = 3;
 const SIDEWAYS_PAUSE_DURATION_MIN = SIDEWAYS_PAUSE_DURATION_MS / 60000;
 
+type SidewaysGateEval = {
+  gate_round: number;
+  last_two_losses: boolean;
+  nifty_range_pts: number;
+  range_window_trades: number;
+  thresholds: {
+    strong_decay_ratio: number;
+    weak_decay_ratio: number;
+    strong_range_lt: number;
+    weak_range_lt: number;
+  };
+  anchor_ce: number | null;
+  anchor_pe: number | null;
+  current_ce: number | null;
+  current_pe: number | null;
+  ce_ratio: number | null;
+  pe_ratio: number | null;
+  strong_double_decay: boolean;
+  mild_double_decay: boolean;
+  skip_decision: boolean;
+};
+
 
 async function getDailyPnl(supabase: any): Promise<number> {
   const nowIST = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
@@ -260,6 +282,7 @@ async function insertMartingaleOpenTrade(
     atm_strike: number;
     symbol?: string;
     entry_reason_tag: string;
+    sideways_gate_eval?: SidewaysGateEval;
   },
 ): Promise<{ error: any | null }> {
   const entryTimeIso = new Date().toISOString();
@@ -282,6 +305,7 @@ async function insertMartingaleOpenTrade(
       target_pct_ui: `%+${PROFIT_TARGET} TP / -${LOSS_LIMIT}% SL on premium`,
       market,
       entry_reason_rule_tag: p.entry_reason_tag,
+      sideways_gate_eval: p.sideways_gate_eval ?? null,
       notes: 'RSI/VWAP not wired to live feed yet (null/unknown placeholders).',
     },
   };
@@ -1286,9 +1310,33 @@ async function shouldSkipNextRound(
   anonKey: string,
   currentCEPrice?: number,
   currentPEPrice?: number,
-): Promise<{ skip: boolean; reason: string }> {
+): Promise<{ skip: boolean; reason: string; eval: SidewaysGateEval }> {
   if (nextRound < SIDEWAYS_MIN_ROUND) {
-    return { skip: false, reason: `R${nextRound}: allowed (<R${SIDEWAYS_MIN_ROUND})` };
+    return {
+      skip: false,
+      reason: `R${nextRound}: allowed (<R${SIDEWAYS_MIN_ROUND})`,
+      eval: {
+        gate_round: nextRound,
+        last_two_losses: false,
+        nifty_range_pts: 0,
+        range_window_trades: RECENT_TRADES_WINDOW,
+        thresholds: {
+          strong_decay_ratio: SIDEWAYS_PREMIUM_DECAY_STRONG,
+          weak_decay_ratio: SIDEWAYS_PREMIUM_DECAY_WEAK,
+          strong_range_lt: SIDEWAYS_NIFTY_RANGE_THRESHOLD,
+          weak_range_lt: SIDEWAYS_NIFTY_RANGE_THRESHOLD_WEAK,
+        },
+        anchor_ce: null,
+        anchor_pe: null,
+        current_ce: currentCEPrice ?? null,
+        current_pe: currentPEPrice ?? null,
+        ce_ratio: null,
+        pe_ratio: null,
+        strong_double_decay: false,
+        mild_double_decay: false,
+        skip_decision: false,
+      },
+    };
   }
 
   const { data: recentTrades } = await supabase
@@ -1299,11 +1347,59 @@ async function shouldSkipNextRound(
     .order('round', { ascending: false })
     .limit(2);
   if (!recentTrades || recentTrades.length < 2) {
-    return { skip: false, reason: 'Not enough history' };
+    return {
+      skip: false,
+      reason: 'Not enough history',
+      eval: {
+        gate_round: nextRound,
+        last_two_losses: false,
+        nifty_range_pts: 0,
+        range_window_trades: RECENT_TRADES_WINDOW,
+        thresholds: {
+          strong_decay_ratio: SIDEWAYS_PREMIUM_DECAY_STRONG,
+          weak_decay_ratio: SIDEWAYS_PREMIUM_DECAY_WEAK,
+          strong_range_lt: SIDEWAYS_NIFTY_RANGE_THRESHOLD,
+          weak_range_lt: SIDEWAYS_NIFTY_RANGE_THRESHOLD_WEAK,
+        },
+        anchor_ce: null,
+        anchor_pe: null,
+        current_ce: currentCEPrice ?? null,
+        current_pe: currentPEPrice ?? null,
+        ce_ratio: null,
+        pe_ratio: null,
+        strong_double_decay: false,
+        mild_double_decay: false,
+        skip_decision: false,
+      },
+    };
   }
   const lastTwoLosses = recentTrades.every((t: any) => (t.pnl || 0) < 0);
   if (!lastTwoLosses) {
-    return { skip: false, reason: `R${nextRound}: last 2 not both losses` };
+    return {
+      skip: false,
+      reason: `R${nextRound}: last 2 not both losses`,
+      eval: {
+        gate_round: nextRound,
+        last_two_losses: false,
+        nifty_range_pts: 0,
+        range_window_trades: RECENT_TRADES_WINDOW,
+        thresholds: {
+          strong_decay_ratio: SIDEWAYS_PREMIUM_DECAY_STRONG,
+          weak_decay_ratio: SIDEWAYS_PREMIUM_DECAY_WEAK,
+          strong_range_lt: SIDEWAYS_NIFTY_RANGE_THRESHOLD,
+          weak_range_lt: SIDEWAYS_NIFTY_RANGE_THRESHOLD_WEAK,
+        },
+        anchor_ce: null,
+        anchor_pe: null,
+        current_ce: currentCEPrice ?? null,
+        current_pe: currentPEPrice ?? null,
+        ce_ratio: null,
+        pe_ratio: null,
+        strong_double_decay: false,
+        mild_double_decay: false,
+        skip_decision: false,
+      },
+    };
   }
 
   // Compute recent Nifty range (last RECENT_TRADES_WINDOW trades)
@@ -1325,11 +1421,17 @@ async function shouldSkipNextRound(
   let decayDetail = '';
   const cePx = currentCEPrice ?? 0;
   const pePx = currentPEPrice ?? 0;
+  let ceRatio: number | null = null;
+  let peRatio: number | null = null;
+  let anchorCEForEval: number | null = null;
+  let anchorPEForEval: number | null = null;
   if (cePx > 0 && pePx > 0) {
     const { anchorCE, anchorPE } = await getSessionPremiumAnchors(supabase, sessionId, allSessionTrades);
+    anchorCEForEval = anchorCE;
+    anchorPEForEval = anchorPE;
     if (anchorCE && anchorPE && anchorCE > MIN_OPTION_PREMIUM && anchorPE > MIN_OPTION_PREMIUM) {
-      const ceRatio = cePx / anchorCE;
-      const peRatio = pePx / anchorPE;
+      ceRatio = cePx / anchorCE;
+      peRatio = pePx / anchorPE;
       strongDoubleDecay = (ceRatio < SIDEWAYS_PREMIUM_DECAY_STRONG && peRatio < SIDEWAYS_PREMIUM_DECAY_STRONG);
       mildDoubleDecay   = (ceRatio < SIDEWAYS_PREMIUM_DECAY_WEAK   && peRatio < SIDEWAYS_PREMIUM_DECAY_WEAK);
       decayDetail = `CE ₹${anchorCE.toFixed(0)}→₹${cePx.toFixed(0)} (${((1-ceRatio)*100).toFixed(1)}%), ` +
@@ -1337,29 +1439,61 @@ async function shouldSkipNextRound(
     }
   }
 
+  const evalSnapshot: SidewaysGateEval = {
+    gate_round: nextRound,
+    last_two_losses: true,
+    nifty_range_pts: Number(niftyRange.toFixed(2)),
+    range_window_trades: RECENT_TRADES_WINDOW,
+    thresholds: {
+      strong_decay_ratio: SIDEWAYS_PREMIUM_DECAY_STRONG,
+      weak_decay_ratio: SIDEWAYS_PREMIUM_DECAY_WEAK,
+      strong_range_lt: SIDEWAYS_NIFTY_RANGE_THRESHOLD,
+      weak_range_lt: SIDEWAYS_NIFTY_RANGE_THRESHOLD_WEAK,
+    },
+    anchor_ce: anchorCEForEval,
+    anchor_pe: anchorPEForEval,
+    current_ce: cePx > 0 ? cePx : null,
+    current_pe: pePx > 0 ? pePx : null,
+    ce_ratio: ceRatio != null ? Number(ceRatio.toFixed(4)) : null,
+    pe_ratio: peRatio != null ? Number(peRatio.toFixed(4)) : null,
+    strong_double_decay: strongDoubleDecay,
+    mild_double_decay: mildDoubleDecay,
+    skip_decision: false,
+  };
+
   // HARD block: strong decay + range under threshold
   if (strongDoubleDecay && niftyRange < SIDEWAYS_NIFTY_RANGE_THRESHOLD) {
+    evalSnapshot.skip_decision = true;
     return {
       skip: true,
       reason: `R${nextRound}: Strong decay + low range (${niftyRange.toFixed(0)} pts). ${decayDetail}`,
+      eval: evalSnapshot,
     };
   }
   // SOFT block: mild decay + range under threshold_weaker
   if (mildDoubleDecay && niftyRange < SIDEWAYS_NIFTY_RANGE_THRESHOLD_WEAK) {
+    evalSnapshot.skip_decision = true;
     return {
       skip: true,
       reason: `R${nextRound}: Mild decay + low range (${niftyRange.toFixed(0)} pts). ${decayDetail}`,
+      eval: evalSnapshot,
     };
   }
   // Safety: extreme scenario
   if ((!cePx || !pePx) && niftyRange < 15) {
+    evalSnapshot.skip_decision = true;
     return {
       skip: true,
       reason: `R${nextRound}: No price data + very low range (${niftyRange.toFixed(0)} pts).`,
+      eval: evalSnapshot,
     };
   }
 
-  return { skip: false, reason: `R${nextRound}: Market moving (${niftyRange.toFixed(0)} pts) or decay not strong` };
+  return {
+    skip: false,
+    reason: `R${nextRound}: Market moving (${niftyRange.toFixed(0)} pts) or decay not strong`,
+    eval: evalSnapshot,
+  };
 }
 
 
@@ -1640,6 +1774,7 @@ async function continueSessionFromLastLoss(
     nifty_spot: optionData.niftySpot,
     atm_strike: optionData.atmStrike,
     entry_reason_tag: 'martingale_flip_after_loss_round',
+    sideways_gate_eval: sidewaysCheck.eval,
   });
   if (insErr) {
     console.error('insertMartingaleOpenTrade:', insErr);
