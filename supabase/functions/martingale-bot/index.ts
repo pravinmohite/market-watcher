@@ -2429,8 +2429,10 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
     const WINDOW_1_END = 11 * 60 + 15;
     const WINDOW_2_START = 14 * 60 + 30;
     const WINDOW_2_END = 15 * 60 + 25;
+    const isExpiryDayTick = tickDay === 2;
     const inWindow1 = tickTime >= WINDOW_1_START && tickTime <= WINDOW_1_END;
-    const inWindow2 = tickTime >= WINDOW_2_START && tickTime <= WINDOW_2_END;
+    // On expiry day (Tuesday) the afternoon window 2:30–3:25 PM is disabled
+    const inWindow2 = !isExpiryDayTick && tickTime >= WINDOW_2_START && tickTime <= WINDOW_2_END;
     const inTradingWindow = inWindow1 || inWindow2;
 
     if (!inTradingWindow) {
@@ -2574,7 +2576,7 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
       // Only auto-restart if a sideways pause key existed and just expired (was cleared by isInSidewaysPause)
       if (hadSidewaysPause && !sidewaysPause.paused) {
         const inMorningWindow = tickTime >= (9 * 60 + 25) && tickTime <= (11 * 60 + 15);
-        const inAfternoonWindow = tickTime >= (14 * 60 + 30) && tickTime <= (15 * 60 + 25);
+        const inAfternoonWindow = !isExpiryDayTick && tickTime >= (14 * 60 + 30) && tickTime <= (15 * 60 + 25);
         if (inMorningWindow || inAfternoonWindow) {
           const dailyPnl = await getDailyPnl(supabase);
           const dailyLimit = await getDailyLossLimit(supabase);
@@ -2687,7 +2689,7 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
         }
 
         const inMorningWindow = tickTime >= (9 * 60 + 25) && tickTime <= (11 * 60 + 15);
-        const inAfternoonWindow = tickTime >= (14 * 60 + 30) && tickTime <= (15 * 60 + 25);
+        const inAfternoonWindow = !isExpiryDayTick && tickTime >= (14 * 60 + 30) && tickTime <= (15 * 60 + 25);
         if (inMorningWindow || inAfternoonWindow) {
           const dailyPnl = await getDailyPnl(supabase);
           const dailyLimit = await getDailyLossLimit(supabase);
@@ -2941,8 +2943,9 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
       // GUARD 1: Check if we're still in a trading window (use < for end boundary to prevent starting at exact square-off time)
       const nowCheck = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
       const checkTime = nowCheck.getHours() * 60 + nowCheck.getMinutes();
+      const isExpiryDayCheck = nowCheck.getDay() === 2;
       const inW1 = checkTime >= (9 * 60 + 25) && checkTime < (11 * 60 + 15);
-      const inW2 = checkTime >= (14 * 60 + 30) && checkTime < (15 * 60 + 25);
+      const inW2 = !isExpiryDayCheck && checkTime >= (14 * 60 + 30) && checkTime < (15 * 60 + 25);
       if (!inW1 && !inW2) {
         console.log(`New session skipped: outside trading windows (${nowCheck.getHours()}:${String(nowCheck.getMinutes()).padStart(2, '0')} IST)`);
         return;
