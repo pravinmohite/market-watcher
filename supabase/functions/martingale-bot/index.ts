@@ -2429,8 +2429,10 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
     const WINDOW_1_END = 11 * 60 + 15;
     const WINDOW_2_START = 14 * 60 + 30;
     const WINDOW_2_END = 15 * 60 + 25;
+    const isExpiryDayTick = tickDay === 2;
     const inWindow1 = tickTime >= WINDOW_1_START && tickTime <= WINDOW_1_END;
-    const inWindow2 = tickTime >= WINDOW_2_START && tickTime <= WINDOW_2_END;
+    // On expiry day (Tuesday) the afternoon window 2:30–3:25 PM is disabled
+    const inWindow2 = !isExpiryDayTick && tickTime >= WINDOW_2_START && tickTime <= WINDOW_2_END;
     const inTradingWindow = inWindow1 || inWindow2;
 
     if (!inTradingWindow) {
