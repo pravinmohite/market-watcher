@@ -2943,8 +2943,9 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
       // GUARD 1: Check if we're still in a trading window (use < for end boundary to prevent starting at exact square-off time)
       const nowCheck = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
       const checkTime = nowCheck.getHours() * 60 + nowCheck.getMinutes();
+      const isExpiryDayCheck = nowCheck.getDay() === 2;
       const inW1 = checkTime >= (9 * 60 + 25) && checkTime < (11 * 60 + 15);
-      const inW2 = checkTime >= (14 * 60 + 30) && checkTime < (15 * 60 + 25);
+      const inW2 = !isExpiryDayCheck && checkTime >= (14 * 60 + 30) && checkTime < (15 * 60 + 25);
       if (!inW1 && !inW2) {
         console.log(`New session skipped: outside trading windows (${nowCheck.getHours()}:${String(nowCheck.getMinutes()).padStart(2, '0')} IST)`);
         return;
