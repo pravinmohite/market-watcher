@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { ArrowLeft, BarChart3, RefreshCw, Sparkles } from "lucide-react";
@@ -134,6 +134,30 @@ function previousCompletedWeekMondayDefault(): string {
   );
 }
 
+const TRADES_PAGE_SIZE = 50;
+
+/** Calendar date YYYY-MM-DD in Asia/Kolkata. */
+function istCalendarYmd(d: Date = new Date()): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Kolkata",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(d);
+}
+
+/**
+ * Seven inclusive IST calendar days through “today” (Kolkata): from 00:00 IST on (today − 6 days) onward.
+ * Uses noon ± day offsets so month boundaries stay correct; returned string is ISO‑8601 with +05:30 for `gte(entry_time, ...)`.
+ */
+function tradesSevenIstCalendarDaysWindowStartIso(): string {
+  const todayYmd = istCalendarYmd(new Date());
+  const anchorMs = Date.parse(`${todayYmd}T12:00:00+05:30`);
+  const startMs = anchorMs - 6 * 24 * 60 * 60 * 1000;
+  const startYmd = istCalendarYmd(new Date(startMs));
+  return `${startYmd}T00:00:00+05:30`;
+}
+
 const MartingaleAnalytics = () => {
   const queryClient = useQueryClient();
   const [analysisDay, setAnalysisDay] = useState(() => {
@@ -165,21 +189,38 @@ const MartingaleAnalytics = () => {
     refetchInterval: 30_000,
   });
 
-  const { data: trades = [], isLoading: tradesLoading } = useQuery({
-    queryKey: ["martingale-trades-analytics"],
-    queryFn: async () => {
+  const {
+    data: tradesPages,
+    fetchNextPage,
+    hasNextPage,
+    isFetchingNextPage,
+    isPending: tradesPending,
+    isError: tradesError,
+  } = useInfiniteQuery({
+    queryKey: ["martingale-trades-analytics", "7d-ist-cal", istCalendarYmd(new Date())],
+    initialPageParam: 0,
+    queryFn: async ({ pageParam }) => {
+      const windowStart = tradesSevenIstCalendarDaysWindowStartIso();
+      const from = pageParam as number;
+      const to = from + TRADES_PAGE_SIZE - 1;
       const { data, error } = await supabase
         .from("martingale_trades" as never)
         .select(
           "id, session_id, round, option_type, strike_price, entry_price, exit_price, entry_time, exit_time, pnl, status, trade_result, trade_log",
         )
+        .gte("entry_time", windowStart)
         .order("entry_time", { ascending: false })
-        .limit(150);
+        .range(from, to);
       if (error) throw error;
       return (data || []) as TradeRow[];
     },
-    refetchInterval: 60_000,
+    getNextPageParam: (lastPage, allPages) => {
+      if (!lastPage || lastPage.length < TRADES_PAGE_SIZE) return undefined;
+      return allPages.length * TRADES_PAGE_SIZE;
+    },
   });
+
+  const trades = useMemo(() => (tradesPages?.pages ?? []).flat(), [tradesPages]);
 
   const { data: reports = [], isLoading: reportsLoading } = useQuery({
     queryKey: ["martingale-daily-reports"],
@@ -371,7 +412,7 @@ const MartingaleAnalytics = () => {
         <Tabs defaultValue="ticks">
           <TabsList className="flex-wrap h-auto gap-1">
             <TabsTrigger value="ticks">CE/PE ticks ({ticks.length})</TabsTrigger>
-            <TabsTrigger value="trades">Trades ({trades.length})</TabsTrigger>
+            <TabsTrigger value="trades">Trades (7 IST days · {trades.length} loaded)</TabsTrigger>
             <TabsTrigger value="reports">
               Reports ({reports.length} · {weeklyReports.length})
             </TabsTrigger>
@@ -447,6 +488,13 @@ const MartingaleAnalytics = () => {
 
           <TabsContent value="trades" className="mt-4">
             <Card>
+              <CardHeader className="pb-0">
+                <CardDescription className="text-xs">
+                  Trades with <code className="text-[10px]">entry_time</code> from <strong>00:00 IST six days ago through now</strong> (seven
+                  inclusive calendar days in Asia/Kolkata). Loads {TRADES_PAGE_SIZE} rows at a time; use <strong>Load more</strong> for the rest in
+                  that window.
+                </CardDescription>
+              </CardHeader>
               <CardContent className="pt-4">
                 <div className="max-h-[560px] overflow-auto rounded-md border">
                   <Table>
@@ -483,10 +531,22 @@ const MartingaleAnalytics = () => {
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {tradesLoading ? (
+                      {tradesPending ? (
                         <TableRow>
                           <TableCell colSpan={16} className="text-muted-foreground">
                             Loading…
+                          </TableCell>
+                        </TableRow>
+                      ) : tradesError ? (
+                        <TableRow>
+                          <TableCell colSpan={16} className="text-destructive">
+                            Could not load trades.
+                          </TableCell>
+                        </TableRow>
+                      ) : trades.length === 0 ? (
+                        <TableRow>
+                          <TableCell colSpan={16} className="text-muted-foreground">
+                            No trades in the current 7 IST calendar day window.
                           </TableCell>
                         </TableRow>
                       ) : (
@@ -544,6 +604,17 @@ const MartingaleAnalytics = () => {
                       )}
                     </TableBody>
                   </Table>
+                </div>
+                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 pt-3">
+                  <p className="text-xs text-muted-foreground">
+                    Showing <strong>{trades.length}</strong> trade{trades.length === 1 ? "" : "s"} (newest first)
+                    {hasNextPage ? " · more in this 7 IST calendar day window" : trades.length > 0 ? " · all loaded for this window" : ""}
+                  </p>
+                  {hasNextPage ? (
+                    <Button type="button" variant="outline" size="sm" onClick={() => fetchNextPage()} disabled={isFetchingNextPage}>
+                      {isFetchingNextPage ? "Loading…" : "Load more"}
+                    </Button>
+                  ) : null}
                 </div>
               </CardContent>
             </Card>
