@@ -40,6 +40,64 @@ type TradeRow = {
   trade_log: unknown;
 };
 
+/** Sideways/decay gate snapshot written on martingale-flip entries (see edge `sideways_gate_eval`). */
+type SidewaysGateEval = {
+  gate_round?: number;
+  last_two_losses?: boolean;
+  nifty_range_pts?: number;
+  range_window_trades?: number;
+  thresholds?: {
+    strong_decay_ratio?: number;
+    weak_decay_ratio?: number;
+    strong_range_lt?: number;
+    weak_range_lt?: number;
+  };
+  anchor_ce?: number | null;
+  anchor_pe?: number | null;
+  current_ce?: number | null;
+  current_pe?: number | null;
+  ce_ratio?: number | null;
+  pe_ratio?: number | null;
+  range_source?: "premium_ticks" | "trade_spots" | "none";
+  anchor_ce_strike?: number | null;
+  anchor_pe_strike?: number | null;
+  current_ce_strike?: number | null;
+  current_pe_strike?: number | null;
+  strike_consistent?: boolean;
+  strong_double_decay?: boolean;
+  mild_double_decay?: boolean;
+  skip_decision?: boolean;
+};
+
+function sidewaysGateTooltip(ev: SidewaysGateEval): string {
+  return JSON.stringify(ev, null, 2);
+}
+
+function gateRangeShort(ev: SidewaysGateEval): string {
+  if (ev.range_source === "none" || ev.range_source == null || ev.nifty_range_pts == null) return "—";
+  const src =
+    ev.range_source === "premium_ticks" ? "ticks" : ev.range_source === "trade_spots" ? "trades" : ev.range_source;
+  return `${Number(ev.nifty_range_pts).toFixed(1)} (${src})`;
+}
+
+function gateRatiosShort(ev: SidewaysGateEval): string {
+  if (ev.ce_ratio == null && ev.pe_ratio == null) return "—";
+  const c = ev.ce_ratio != null ? Number(ev.ce_ratio).toFixed(3) : "—";
+  const p = ev.pe_ratio != null ? Number(ev.pe_ratio).toFixed(3) : "—";
+  return `${c} / ${p}`;
+}
+
+function gateDecayShort(ev: SidewaysGateEval): string {
+  if (ev.strong_double_decay) return "strong";
+  if (ev.mild_double_decay) return "mild";
+  return "—";
+}
+
+function gateYesNo(val: boolean | undefined): string {
+  if (val === undefined) return "—";
+  return val ? "Y" : "N";
+}
+
 function fmtIst(iso: string) {
   try {
     return new Date(iso).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
@@ -404,21 +462,48 @@ const MartingaleAnalytics = () => {
                         <TableHead className="text-right">PnL ₹</TableHead>
                         <TableHead>Trend @entry</TableHead>
                         <TableHead className="text-xs max-w-[140px]">Entry tag</TableHead>
+                        <TableHead className="text-xs text-center" title="Round evaluated by sideways gate">
+                          Gate R
+                        </TableHead>
+                        <TableHead className="text-xs whitespace-nowrap" title="Nifty range + source (premium ticks vs trade spots)">
+                          Nifty rng
+                        </TableHead>
+                        <TableHead className="text-xs whitespace-nowrap" title="CE/PE ratio vs session anchor premiums">
+                          CE/PE r
+                        </TableHead>
+                        <TableHead className="text-xs" title="Double-decay tier">
+                          Decay
+                        </TableHead>
+                        <TableHead className="text-xs text-center" title="Anchor vs current OTM strikes aligned">
+                          Str OK
+                        </TableHead>
+                        <TableHead className="text-xs text-center" title="Gate would skip this round (pause session)">
+                          Skip?
+                        </TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
                       {tradesLoading ? (
                         <TableRow>
-                          <TableCell colSpan={10} className="text-muted-foreground">
+                          <TableCell colSpan={16} className="text-muted-foreground">
                             Loading…
                           </TableCell>
                         </TableRow>
                       ) : (
                         trades.map((t) => {
                           const lg = (t.trade_log || {}) as {
-                            entry?: { market?: { trend?: string }; entry_reason_rule_tag?: string };
+                            entry?: {
+                              market?: { trend?: string };
+                              entry_reason_rule_tag?: string;
+                              sideways_gate_eval?: SidewaysGateEval | null;
+                            };
                             exit?: { close_reason?: string };
                           };
+                          const ge =
+                            lg.entry?.sideways_gate_eval && typeof lg.entry.sideways_gate_eval === "object"
+                              ? (lg.entry.sideways_gate_eval as SidewaysGateEval)
+                              : null;
+                          const gateFull = ge ? sidewaysGateTooltip(ge) : undefined;
                           return (
                             <TableRow key={t.id}>
                               <TableCell className="text-xs whitespace-nowrap">{fmtIst(t.entry_time)}</TableCell>
@@ -434,6 +519,24 @@ const MartingaleAnalytics = () => {
                               <TableCell className="text-xs">{lg.entry?.market?.trend ?? "—"}</TableCell>
                               <TableCell className="text-[10px] max-w-[200px] truncate" title={lg.entry?.entry_reason_rule_tag}>
                                 {lg.entry?.entry_reason_rule_tag ?? "—"}
+                              </TableCell>
+                              <TableCell className="text-center text-xs font-mono" title={gateFull}>
+                                {ge?.gate_round != null ? ge.gate_round : "—"}
+                              </TableCell>
+                              <TableCell className="text-xs font-mono whitespace-nowrap" title={gateFull}>
+                                {ge ? gateRangeShort(ge) : "—"}
+                              </TableCell>
+                              <TableCell className="text-[10px] font-mono whitespace-nowrap max-w-[100px]" title={gateFull}>
+                                {ge ? gateRatiosShort(ge) : "—"}
+                              </TableCell>
+                              <TableCell className="text-xs capitalize" title={gateFull}>
+                                {ge ? gateDecayShort(ge) : "—"}
+                              </TableCell>
+                              <TableCell className="text-center text-xs font-mono" title={gateFull}>
+                                {ge ? gateYesNo(ge.strike_consistent) : "—"}
+                              </TableCell>
+                              <TableCell className="text-center text-xs font-mono" title={gateFull}>
+                                {ge && ge.skip_decision !== undefined ? (ge.skip_decision ? "Y" : "N") : "—"}
                               </TableCell>
                             </TableRow>
                           );
@@ -461,19 +564,22 @@ const MartingaleAnalytics = () => {
                         <TableHead className="text-right">Trades</TableHead>
                         <TableHead className="text-right">Win %</TableHead>
                         <TableHead className="text-right">Max DD ₹</TableHead>
+                        <TableHead className="text-[10px] whitespace-nowrap" title="Sideways/decay gate pauses logged that day">
+                          Pause gates
+                        </TableHead>
                         <TableHead className="text-xs max-w-[320px]">Sample warnings</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
                       {reportsLoading ? (
                         <TableRow>
-                          <TableCell colSpan={5} className="text-muted-foreground">
+                          <TableCell colSpan={6} className="text-muted-foreground">
                             Loading…
                           </TableCell>
                         </TableRow>
                       ) : reports.length === 0 ? (
                         <TableRow>
-                          <TableCell colSpan={5} className="text-muted-foreground">
+                          <TableCell colSpan={6} className="text-muted-foreground">
                             No saved reports. Pick a date above and Run & save.
                           </TableCell>
                         </TableRow>
@@ -483,6 +589,18 @@ const MartingaleAnalytics = () => {
                             | { trade_count_closed?: number; win_rate_pct?: number; max_drawdown_inr?: number }
                             | undefined;
                           const warnings = rep.report?.risk_warnings as string[] | undefined;
+                          const pauseSum = rep.report?.pause_gate_summary as
+                            | {
+                                count?: number;
+                                avg_nifty_range_pts?: number | null;
+                                avg_ce_drop_pct?: number | null;
+                                avg_pe_drop_pct?: number | null;
+                              }
+                            | undefined;
+                          const pauseLabel =
+                            pauseSum?.count != null && pauseSum.count > 0
+                              ? `${pauseSum.count} · rng ${pauseSum.avg_nifty_range_pts ?? "—"} · CE↓${pauseSum.avg_ce_drop_pct ?? "—"}% PE↓${pauseSum.avg_pe_drop_pct ?? "—"}%`
+                              : "—";
                           return (
                             <TableRow key={rep.id}>
                               <TableCell className="font-medium">{rep.trading_day}</TableCell>
@@ -492,6 +610,9 @@ const MartingaleAnalytics = () => {
                               </TableCell>
                               <TableCell className="text-right font-mono text-xs">
                                 {summary?.max_drawdown_inr != null ? Number(summary.max_drawdown_inr).toFixed(0) : "—"}
+                              </TableCell>
+                              <TableCell className="text-[10px] font-mono text-muted-foreground max-w-[220px]" title={pauseLabel}>
+                                {pauseLabel}
                               </TableCell>
                               <TableCell className="text-[11px] text-muted-foreground max-w-md">
                                 {warnings?.length ? warnings.join("; ") : "—"}
@@ -526,19 +647,22 @@ const MartingaleAnalytics = () => {
                         <TableHead className="text-right">Net ₹</TableHead>
                         <TableHead className="text-right">Max DD ₹</TableHead>
                         <TableHead className="text-right text-xs">CE/PE ticks</TableHead>
+                        <TableHead className="text-right text-[10px]" title="Decay/sideways pause rows in week window">
+                          Pauses
+                        </TableHead>
                         <TableHead className="text-xs min-w-[280px]">Expert review</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
                       {weeklyReportsLoading ? (
                         <TableRow>
-                          <TableCell colSpan={8} className="text-muted-foreground">
+                          <TableCell colSpan={9} className="text-muted-foreground">
                             Loading…
                           </TableCell>
                         </TableRow>
                       ) : weeklyReports.length === 0 ? (
                         <TableRow>
-                          <TableCell colSpan={8} className="text-muted-foreground">
+                          <TableCell colSpan={9} className="text-muted-foreground">
                             No weekly rows yet. Apply migration <code className="text-xs">martingale_weekly_reports</code>, deploy the edge
                             function, then use <strong>Run week &amp; save</strong> above.
                           </TableCell>
@@ -557,6 +681,20 @@ const MartingaleAnalytics = () => {
                             | undefined;
                           const expert = wr.report?.expert_review as string[] | undefined;
                           const excerpt = expert?.length ? expert.slice(0, 3).join(" · ") : "—";
+                          const pw = wr.report?.pause_gate_summary as
+                            | {
+                                count?: number;
+                                avg_nifty_range_pts?: number | null;
+                                avg_ce_drop_pct?: number | null;
+                                avg_pe_drop_pct?: number | null;
+                              }
+                            | undefined;
+                          const pauseWeekLabel =
+                            pw?.count != null && pw.count > 0 ? `${pw.count} · rng ${pw.avg_nifty_range_pts ?? "—"}` : "—";
+                          const pauseWeekTitle =
+                            pw?.count != null && pw.count > 0
+                              ? `${pw.count} pause(s): avg rng ${pw.avg_nifty_range_pts ?? "—"} pts; CE↓${pw.avg_ce_drop_pct ?? "—"}% PE↓${pw.avg_pe_drop_pct ?? "—"}%`
+                              : undefined;
                           return (
                             <TableRow key={wr.id}>
                               <TableCell className="font-medium text-xs whitespace-nowrap">
@@ -574,6 +712,9 @@ const MartingaleAnalytics = () => {
                                 {summary?.max_drawdown_inr != null ? Number(summary.max_drawdown_inr).toFixed(0) : "—"}
                               </TableCell>
                               <TableCell className="text-right text-xs">{summary?.premium_tick_snapshots ?? "—"}</TableCell>
+                              <TableCell className="text-right text-[10px] font-mono text-muted-foreground" title={pauseWeekTitle}>
+                                {pauseWeekLabel}
+                              </TableCell>
                               <TableCell className="text-[11px] text-muted-foreground align-top max-w-xl" title={expert?.join("\n")}>
                                 {excerpt}
                               </TableCell>

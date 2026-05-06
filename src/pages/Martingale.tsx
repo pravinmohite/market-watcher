@@ -177,8 +177,43 @@ const Martingale = () => {
   const dataSource = optionData?.source;
   const dailyPnl = data?.daily_pnl ?? 0;
   const serverDailyLossLimit = data?.daily_loss_limit ?? dailyLossLimit;
-  const decayStatus = data?.decay_status;
-  const pauseInfo = data?.pause_info;
+  const decayStatus = data?.decay_status as
+    | {
+        active?: boolean;
+        pause_until?: string;
+        remaining_mins?: number;
+        title?: string;
+        detail?: string;
+        ce_current?: number;
+        pe_current?: number;
+      }
+    | undefined;
+  const pauseInfo = data?.pause_info as
+    | {
+        paused?: boolean;
+        pause_until?: string;
+        reason?: string;
+        pause_kind?: "order_fill" | "sideways_gate";
+      }
+    | undefined;
+
+  /** Order-fill pause from API, or sideways/decay pause from pause_info / decay_status (same yellow banner). */
+  const pauseBanner = useMemo(() => {
+    if (pauseInfo?.paused) return pauseInfo;
+    if (decayStatus?.active && decayStatus.pause_until) {
+      return {
+        paused: true as const,
+        pause_until: decayStatus.pause_until,
+        reason:
+          typeof decayStatus.detail === "string" && decayStatus.detail.trim()
+            ? decayStatus.detail
+            : decayStatus.title || "Trading paused — sideways / range / decay gate.",
+        pause_kind: "sideways_gate" as const,
+      };
+    }
+    return null;
+  }, [pauseInfo, decayStatus]);
+
   const botRunning = data?.bot_running;
 
   // Check if market is open today (weekday + not NSE holiday)
@@ -473,10 +508,10 @@ const Martingale = () => {
             <div className="flex items-center gap-2">
               <div className={cn(
                 "w-2.5 h-2.5 md:w-3 md:h-3 rounded-full shrink-0",
-                isActive ? "bg-gain animate-pulse" : (isPaused || pauseInfo?.paused) ? "bg-yellow-500 animate-pulse" : "bg-muted-foreground"
+                isActive ? "bg-gain animate-pulse" : (isPaused || pauseBanner?.paused) ? "bg-yellow-500 animate-pulse" : "bg-muted-foreground"
               )} />
               <span className="text-xs md:text-sm font-medium text-foreground">
-                {isActive ? "Bot Running" : (isPaused || pauseInfo?.paused) ? "Bot Paused" : "Bot Stopped"}
+                {isActive ? "Bot Running" : (isPaused || pauseBanner?.paused) ? "Bot Paused" : "Bot Stopped"}
               </span>
               {isActive && activeSession && (
                 <span className="text-[10px] md:text-xs text-muted-foreground">
@@ -496,53 +531,57 @@ const Martingale = () => {
           </div>
         </div>
 
-        {/* Paused Session Banner */}
-        {pauseInfo?.paused && (
+        {/* Paused banner: order-fill pause OR sideways / range / decay gate (same style) */}
+        {pauseBanner?.paused && (
           <div className="rounded-xl border border-yellow-500/50 bg-yellow-500/10 p-3 md:p-4">
             <div className="flex items-center gap-2 md:gap-3">
               <div className="w-8 h-8 md:w-10 md:h-10 rounded-lg bg-yellow-500/20 flex items-center justify-center shrink-0">
                 <AlertTriangle className="w-4 h-4 md:w-5 md:h-5 text-yellow-500" />
               </div>
               <div className="min-w-0 flex-1">
-                <p className="text-xs md:text-sm font-semibold text-yellow-500">⏸️ Bot Paused — Auto-resuming</p>
-                <p className="text-[10px] md:text-xs text-muted-foreground mt-0.5">
-                  {pauseInfo.reason || 'Order fill failed after retries'}
+                <p className="text-xs md:text-sm font-semibold text-yellow-500">
+                  {pauseBanner.pause_kind === "sideways_gate"
+                    ? "⏸️ Bot paused — sideways / range / decay gate"
+                    : "⏸️ Bot paused — auto-resuming"}
                 </p>
-                {pauseInfo.pause_until && (
+                <p className="text-[10px] md:text-xs text-muted-foreground mt-0.5">
+                  {pauseBanner.reason ||
+                    (pauseBanner.pause_kind === "sideways_gate"
+                      ? "Paused after R3+ gate (low Nifty range and/or CE+PE decay). Next session starts as fresh R1."
+                      : "Order fill failed after retries")}
+                </p>
+                {pauseBanner.pause_kind === "sideways_gate" &&
+                  decayStatus?.ce_current != null &&
+                  decayStatus?.pe_current != null && (
+                    <p className="text-[10px] md:text-xs text-muted-foreground mt-0.5">
+                      Latest OTM snapshot: CE ₹{decayStatus.ce_current.toFixed(1)} · PE ₹{decayStatus.pe_current.toFixed(1)} (same chain as gate check).
+                    </p>
+                  )}
+                {pauseBanner.pause_until && (
                   <p className="text-[10px] md:text-xs text-muted-foreground mt-0.5">
-                    Resumes at: <span className="font-mono font-medium text-foreground">
-                      {new Date(pauseInfo.pause_until).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' })} IST
+                    Window ends / recheck around:{" "}
+                    <span className="font-mono font-medium text-foreground">
+                      {new Date(pauseBanner.pause_until).toLocaleTimeString("en-IN", {
+                        timeZone: "Asia/Kolkata",
+                        hour: "2-digit",
+                        minute: "2-digit",
+                      })}{" "}
+                      IST
                     </span>
                   </p>
                 )}
               </div>
-              {pauseInfo.pause_until && (() => {
-                const remaining = Math.max(0, Math.ceil((new Date(pauseInfo.pause_until).getTime() - Date.now()) / 60000));
+              {pauseBanner.pause_until && (() => {
+                const remaining = Math.max(
+                  0,
+                  Math.ceil((new Date(pauseBanner.pause_until).getTime() - Date.now()) / 60000),
+                );
                 return (
                   <div className="shrink-0 px-2 py-1 rounded-full bg-yellow-500/20 text-yellow-500 text-[10px] md:text-xs font-mono font-medium animate-pulse">
                     {remaining}m
                   </div>
                 );
               })()}
-            </div>
-          </div>
-        )}
-        {decayStatus?.active && (
-          <div className="rounded-xl border border-warning/50 bg-warning/10 p-3 md:p-4">
-            <div className="flex items-center gap-2 md:gap-3">
-              <div className="w-8 h-8 md:w-10 md:h-10 rounded-lg bg-warning/20 flex items-center justify-center shrink-0">
-                <AlertTriangle className="w-4 h-4 md:w-5 md:h-5 text-warning" />
-              </div>
-              <div className="min-w-0 flex-1">
-                <p className="text-xs md:text-sm font-semibold text-warning">⚠️ Double Decay Detected</p>
-                <p className="text-[10px] md:text-xs text-muted-foreground mt-0.5">
-                  Both CE (₹{decayStatus.ce_current?.toFixed(1)}) and PE (₹{decayStatus.pe_current?.toFixed(1)}) premiums are declining.
-                  Bot paused — rechecking in ~{decayStatus.remaining_mins} min.
-                </p>
-              </div>
-              <div className="shrink-0 px-2 py-1 rounded-full bg-warning/20 text-warning text-[10px] md:text-xs font-mono font-medium animate-pulse">
-                {decayStatus.remaining_mins}m
-              </div>
             </div>
           </div>
         )}

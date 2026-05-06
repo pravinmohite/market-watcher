@@ -28,6 +28,8 @@ const SIDEWAYS_PREMIUM_DECAY_STRONG = 0.94;
 const SIDEWAYS_PREMIUM_DECAY_WEAK = 0.97;
 const MIN_OPTION_PREMIUM = 80;   // ignore options cheaper than this
 const RECENT_TRADES_WINDOW = 5;  // use last 5 trades for range
+const SIDEWAYS_TICK_RANGE_WINDOW_MS = 5 * 60 * 1000; // prefer last 5m premium-tick spots
+const SIDEWAYS_STRIKE_SHIFT_TOLERANCE = 100; // points allowed between anchor and current OTM strikes
 const SIDEWAYS_PAUSE_DURATION_MS = 15 * 60 * 1000;
 const SIDEWAYS_MIN_ROUND = 3;
 const SIDEWAYS_PAUSE_DURATION_MIN = SIDEWAYS_PAUSE_DURATION_MS / 60000;
@@ -49,6 +51,12 @@ type SidewaysGateEval = {
   current_pe: number | null;
   ce_ratio: number | null;
   pe_ratio: number | null;
+  range_source: 'premium_ticks' | 'trade_spots' | 'none';
+  anchor_ce_strike: number | null;
+  anchor_pe_strike: number | null;
+  current_ce_strike: number | null;
+  current_pe_strike: number | null;
+  strike_consistent: boolean;
   strong_double_decay: boolean;
   mild_double_decay: boolean;
   skip_decision: boolean;
@@ -695,7 +703,34 @@ async function computeMartingaleDailyAnalysis(
   const insights: string[] = [`Win rate ${winRatePct.toFixed(1)}% over ${n} exits (median sample rule: segments need ≥${ANALYSIS_MIN_SEGMENT} trades).`];
   insights.push(`Max drawdown ₹${Math.round(maxDd)} (mark-to-trade cumulative on closed legs).`);
 
+  const { data: pauseDayRowsRaw, error: pauseDayErr } = await supabase
+    .from('martingale_pause_events')
+    .select('*')
+    .eq('trading_day_ist', tradingDayYmd)
+    .order('recorded_at', { ascending: true });
+  const pauseDayRows = !pauseDayErr && pauseDayRowsRaw ? pauseDayRowsRaw : [];
+  if (pauseDayErr) console.error('martingale_pause_events daily analysis:', pauseDayErr);
+  const pauseSummaryDaily = summarizePauseGateEvents(pauseDayRows);
+  if (pauseSummaryDaily.count > 0) {
+    insights.push(
+      `${pauseSummaryDaily.count} sideways/decay pause(s): avg gate Nifty range ${pauseSummaryDaily.avg_nifty_range_pts ?? '—'} pts; ` +
+        `premium drop vs anchors avg CE ${pauseSummaryDaily.avg_ce_drop_pct ?? '—'}% / PE ${pauseSummaryDaily.avg_pe_drop_pct ?? '—'}% ` +
+        '(see pause_gate_events).',
+    );
+  }
+
   const globalWinPass = winRatePct >= 55 && n >= ANALYSIS_MIN_GLOBAL;
+
+  const methodologyDaily = [
+    'Do not change live risk constants from ≤2 sessions of data.',
+    'RSI/VWAP placeholders are null until wired from a candles feed.',
+    `Analysis minimums: segment=${ANALYSIS_MIN_SEGMENT}, global=${ANALYSIS_MIN_GLOBAL} trades.`,
+  ];
+  if (pauseSummaryDaily.count > 0) {
+    methodologyDaily.push(
+      'pause_gate_events / pause_gate_summary are derived from martingale_pause_events rows for this IST calendar day.',
+    );
+  }
 
   return {
     trading_day: tradingDayYmd,
@@ -725,11 +760,9 @@ async function computeMartingaleDailyAnalysis(
         : n >= ANALYSIS_MIN_GLOBAL && !globalWinPass
           ? ['Win rate or sample strength does not justify increasing size or widening martingale — favor stability.',]
           : [],
-    methodology_notes: [
-      'Do not change live risk constants from ≤2 sessions of data.',
-      'RSI/VWAP placeholders are null until wired from a candles feed.',
-      `Analysis minimums: segment=${ANALYSIS_MIN_SEGMENT}, global=${ANALYSIS_MIN_GLOBAL} trades.`,
-    ],
+    pause_gate_events: pauseDayRows.map(compactPauseEventForReport),
+    pause_gate_summary: pauseSummaryDaily,
+    methodology_notes: methodologyDaily,
   };
 }
 
@@ -844,18 +877,39 @@ async function computeMartingaleWeeklyAnalysis(
     .lte('recorded_at', endIso);
   if (!tickErr && typeof tickCnt === 'number') premiumTickCount = tickCnt;
 
-  const expert_review = buildWeeklyExpertReview({
-    n,
-    winRatePct,
-    maxDd,
-    distinctIstTradingDays: istDays.size,
-    avgWin,
-    avgLoss,
-    byWeekday,
-    byTrend,
-    pnlByRound,
-    premiumTickCount,
-  });
+  const { data: pauseWeekRowsRaw, error: pauseWeekErr } = await supabase
+    .from('martingale_pause_events')
+    .select('*')
+    .gte('recorded_at', startIso)
+    .lte('recorded_at', endIso)
+    .order('recorded_at', { ascending: true });
+  const pauseWeekRows = !pauseWeekErr && pauseWeekRowsRaw ? pauseWeekRowsRaw : [];
+  if (pauseWeekErr) console.error('martingale_pause_events weekly analysis:', pauseWeekErr);
+  const pauseWeekSummary = summarizePauseGateEvents(pauseWeekRows);
+  const pauseExpertLines: string[] = [];
+  if (pauseWeekSummary.count > 0) {
+    pauseExpertLines.push(
+      `Sideways/decay pauses (${pauseWeekSummary.count}×): avg intra-gate Nifty range ~${pauseWeekSummary.avg_nifty_range_pts ?? '—'} pts; ` +
+        `CE / PE premium drop vs anchors avg ${pauseWeekSummary.avg_ce_drop_pct ?? '—'}% / ${pauseWeekSummary.avg_pe_drop_pct ?? '—'}% ` +
+        `(max CE ${pauseWeekSummary.max_ce_drop_pct ?? '—'}% / PE ${pauseWeekSummary.max_pe_drop_pct ?? '—'}%). See pause_gate_events.`,
+    );
+  }
+
+  const expert_review = [
+    ...buildWeeklyExpertReview({
+      n,
+      winRatePct,
+      maxDd,
+      distinctIstTradingDays: istDays.size,
+      avgWin,
+      avgLoss,
+      byWeekday,
+      byTrend,
+      pnlByRound,
+      premiumTickCount,
+    }),
+    ...pauseExpertLines,
+  ];
 
   const segmentsCondensed = Object.fromEntries(
     Object.entries({ byWeekday, bySessionBucket, byTrend, byRound: byRoundSeg, volatilityBuckets }).map(([nm, mm]) => {
@@ -893,10 +947,17 @@ async function computeMartingaleWeeklyAnalysis(
     },
     segmented: segmentsCondensed,
     expert_review,
+    pause_gate_events: pauseWeekRows.map(compactPauseEventForReport),
+    pause_gate_summary: pauseWeekSummary,
     methodology_notes: [
       'Weekly roll-up aggregates closes by IST exit timestamp across Mon–Sun; align your trading week to this boundary.',
       'After 2–3 days of detailed logs, revisit expert_review weekly; corroborate with premium tick tab before rule changes.',
       `Target ≥${ANALYSIS_WEEK_MIN_TRADES} weekly exits before aggressive optimization; segments still use min ${ANALYSIS_MIN_SEGMENT}.`,
+      ...(pauseWeekSummary.count > 0
+        ? [
+            'pause_gate_* fields join martingale_pause_events by recorded_at within this IST week window (covers post-close rechecks).',
+          ]
+        : []),
       'Education only — not financial advice.',
     ],
   };
@@ -1164,6 +1225,29 @@ async function getSessionPremiumAnchors(
   return { anchorCE, anchorPE };
 }
 
+async function getSessionAnchorStrikes(
+  supabase: any,
+  sessionId: string,
+): Promise<{ anchorCEStrike: number | null; anchorPEStrike: number | null }> {
+  const { data: firstTick } = await supabase
+    .from('martingale_premium_ticks')
+    .select('otm_ce_strike, otm_pe_strike, recorded_at')
+    .eq('session_id', sessionId)
+    .order('recorded_at', { ascending: true })
+    .limit(1)
+    .maybeSingle();
+
+  const anchorCEStrike =
+    firstTick?.otm_ce_strike != null && !Number.isNaN(Number(firstTick.otm_ce_strike))
+      ? Number(firstTick.otm_ce_strike)
+      : null;
+  const anchorPEStrike =
+    firstTick?.otm_pe_strike != null && !Number.isNaN(Number(firstTick.otm_pe_strike))
+      ? Number(firstTick.otm_pe_strike)
+      : null;
+  return { anchorCEStrike, anchorPEStrike };
+}
+
 
 
 // async function shouldSkipNextRound(
@@ -1310,6 +1394,8 @@ async function shouldSkipNextRound(
   anonKey: string,
   currentCEPrice?: number,
   currentPEPrice?: number,
+  currentCEStrike?: number,
+  currentPEStrike?: number,
 ): Promise<{ skip: boolean; reason: string; eval: SidewaysGateEval }> {
   if (nextRound < SIDEWAYS_MIN_ROUND) {
     return {
@@ -1332,6 +1418,12 @@ async function shouldSkipNextRound(
         current_pe: currentPEPrice ?? null,
         ce_ratio: null,
         pe_ratio: null,
+        range_source: 'none',
+        anchor_ce_strike: null,
+        anchor_pe_strike: null,
+        current_ce_strike: currentCEStrike ?? null,
+        current_pe_strike: currentPEStrike ?? null,
+        strike_consistent: false,
         strong_double_decay: false,
         mild_double_decay: false,
         skip_decision: false,
@@ -1367,6 +1459,12 @@ async function shouldSkipNextRound(
         current_pe: currentPEPrice ?? null,
         ce_ratio: null,
         pe_ratio: null,
+        range_source: 'none',
+        anchor_ce_strike: null,
+        anchor_pe_strike: null,
+        current_ce_strike: currentCEStrike ?? null,
+        current_pe_strike: currentPEStrike ?? null,
+        strike_consistent: false,
         strong_double_decay: false,
         mild_double_decay: false,
         skip_decision: false,
@@ -1395,6 +1493,12 @@ async function shouldSkipNextRound(
         current_pe: currentPEPrice ?? null,
         ce_ratio: null,
         pe_ratio: null,
+        range_source: 'none',
+        anchor_ce_strike: null,
+        anchor_pe_strike: null,
+        current_ce_strike: currentCEStrike ?? null,
+        current_pe_strike: currentPEStrike ?? null,
+        strike_consistent: false,
         strong_double_decay: false,
         mild_double_decay: false,
         skip_decision: false,
@@ -1402,17 +1506,34 @@ async function shouldSkipNextRound(
     };
   }
 
-  // Compute recent Nifty range (last RECENT_TRADES_WINDOW trades)
+  // Prefer high-resolution spot range from premium ticks (last N minutes), fallback to trade-entry spots.
   const { data: allSessionTrades } = await supabase
     .from('martingale_trades')
     .select('nifty_spot, entry_time')
     .eq('session_id', sessionId)
     .order('entry_time', { ascending: true });
+  const rangeCutoffIso = new Date(Date.now() - SIDEWAYS_TICK_RANGE_WINDOW_MS).toISOString();
+  const { data: recentTicks } = await supabase
+    .from('martingale_premium_ticks')
+    .select('nifty_spot')
+    .eq('session_id', sessionId)
+    .gte('recorded_at', rangeCutoffIso)
+    .order('recorded_at', { ascending: true });
+
   let niftyRange = 0;
-  if (allSessionTrades && allSessionTrades.length > 0) {
+  let rangeSource: SidewaysGateEval['range_source'] = 'none';
+  if (recentTicks && recentTicks.length >= 2) {
+    const tickSpots = recentTicks.map((t: any) => Number(t.nifty_spot)).filter((s: number) => s > 0);
+    if (tickSpots.length >= 2) {
+      niftyRange = calculateRange(tickSpots, niftySpot, Math.max(tickSpots.length, 2));
+      rangeSource = 'premium_ticks';
+    }
+  }
+  if (rangeSource === 'none' && allSessionTrades && allSessionTrades.length > 0) {
     const spots = allSessionTrades.map((t: any) => Number(t.nifty_spot)).filter((s: number) => s > 0);
     if (spots.length > 0) {
       niftyRange = calculateRange(spots, niftySpot, RECENT_TRADES_WINDOW);
+      rangeSource = 'trade_spots';
     }
   }
 
@@ -1425,11 +1546,32 @@ async function shouldSkipNextRound(
   let peRatio: number | null = null;
   let anchorCEForEval: number | null = null;
   let anchorPEForEval: number | null = null;
+  let anchorCEStrike: number | null = null;
+  let anchorPEStrike: number | null = null;
+  let strikeConsistent = false;
   if (cePx > 0 && pePx > 0) {
     const { anchorCE, anchorPE } = await getSessionPremiumAnchors(supabase, sessionId, allSessionTrades);
+    const anchorStrikes = await getSessionAnchorStrikes(supabase, sessionId);
+    anchorCEStrike = anchorStrikes.anchorCEStrike;
+    anchorPEStrike = anchorStrikes.anchorPEStrike;
+    const ceStrikeAligned =
+      anchorCEStrike != null && currentCEStrike != null
+        ? Math.abs(currentCEStrike - anchorCEStrike) <= SIDEWAYS_STRIKE_SHIFT_TOLERANCE
+        : false;
+    const peStrikeAligned =
+      anchorPEStrike != null && currentPEStrike != null
+        ? Math.abs(currentPEStrike - anchorPEStrike) <= SIDEWAYS_STRIKE_SHIFT_TOLERANCE
+        : false;
+    strikeConsistent = ceStrikeAligned && peStrikeAligned;
     anchorCEForEval = anchorCE;
     anchorPEForEval = anchorPE;
-    if (anchorCE && anchorPE && anchorCE > MIN_OPTION_PREMIUM && anchorPE > MIN_OPTION_PREMIUM) {
+    if (
+      strikeConsistent &&
+      anchorCE &&
+      anchorPE &&
+      anchorCE > MIN_OPTION_PREMIUM &&
+      anchorPE > MIN_OPTION_PREMIUM
+    ) {
       ceRatio = cePx / anchorCE;
       peRatio = pePx / anchorPE;
       strongDoubleDecay = (ceRatio < SIDEWAYS_PREMIUM_DECAY_STRONG && peRatio < SIDEWAYS_PREMIUM_DECAY_STRONG);
@@ -1456,6 +1598,12 @@ async function shouldSkipNextRound(
     current_pe: pePx > 0 ? pePx : null,
     ce_ratio: ceRatio != null ? Number(ceRatio.toFixed(4)) : null,
     pe_ratio: peRatio != null ? Number(peRatio.toFixed(4)) : null,
+    range_source: rangeSource,
+    anchor_ce_strike: anchorCEStrike,
+    anchor_pe_strike: anchorPEStrike,
+    current_ce_strike: currentCEStrike ?? null,
+    current_pe_strike: currentPEStrike ?? null,
+    strike_consistent: strikeConsistent,
     strong_double_decay: strongDoubleDecay,
     mild_double_decay: mildDoubleDecay,
     skip_decision: false,
@@ -1467,6 +1615,15 @@ async function shouldSkipNextRound(
     return {
       skip: true,
       reason: `R${nextRound}: Strong decay + low range (${niftyRange.toFixed(0)} pts). ${decayDetail}`,
+      eval: evalSnapshot,
+    };
+  }
+  // Deep martingale hardening: from R4 onward, block on either strong decay OR very low range.
+  if (nextRound >= 4 && (strongDoubleDecay || niftyRange < SIDEWAYS_NIFTY_RANGE_THRESHOLD)) {
+    evalSnapshot.skip_decision = true;
+    return {
+      skip: true,
+      reason: `R${nextRound}: Deep-round block (${strongDoubleDecay ? 'strong decay' : 'very low range'}) with range ${niftyRange.toFixed(0)} pts.`,
       eval: evalSnapshot,
     };
   }
@@ -1505,6 +1662,8 @@ async function isInSidewaysPause(
   anonKey?: string,
   currentCEPrice?: number,
   currentPEPrice?: number,
+  currentCEStrike?: number,
+  currentPEStrike?: number,
 ): Promise<{ paused: boolean; remainingMins: number }> {
   const { data } = await supabase
     .from('bot_settings')
@@ -1523,25 +1682,43 @@ async function isInSidewaysPause(
     return { paused: true, remainingMins };
   }
 
-  // Pause expired — recheck conditions
+  // Pause expired — recheck conditions (R3-equivalent gate; needs session trades so sessionId matters)
   const nextRound = 3;
-  const { skip } = await shouldSkipNextRound(
+  const recheckGate = await shouldSkipNextRound(
     supabase,
-    sessionId,
+    sessionId ?? '',
     nextRound,
-    niftySpot,
-    supabaseUrl,
-    anonKey,
+    niftySpot ?? 0,
+    supabaseUrl ?? '',
+    anonKey ?? '',
     currentCEPrice,
     currentPEPrice,
+    currentCEStrike,
+    currentPEStrike,
   );
 
-  if (skip) {
-    await setSidewaysPause(supabase);
+  if (recheckGate.skip) {
+    const extendReason =
+      typeof recheckGate.reason === 'string' && recheckGate.reason.trim().length > 0
+        ? `${recheckGate.reason} — extended after pause expiry (gate recheck).`
+        : 'Sideways gate still triggered after pause — extended 15 min (recheck at R3).';
+    const pauseUntilIso = await setSidewaysPause(supabase, extendReason);
+    insertMartingalePauseEventFireAndForget(
+      supabase,
+      pauseEventRowFromSidewaysEval({
+        sessionId: sanitizeSessionIdForPause(sessionId),
+        pauseUntilIso,
+        reason: extendReason,
+        niftySpot: niftySpot ?? 0,
+        gateEval: recheckGate.eval,
+        pauseKind: 'sideways_gate_reextend',
+      }),
+    );
     return { paused: true, remainingMins: Math.ceil(SIDEWAYS_PAUSE_DURATION_MS / 60000) };
   }
 
   await supabase.from('bot_settings').delete().eq('key', 'sideways_pause_until');
+  await supabase.from('bot_settings').delete().eq('key', 'sideways_pause_reason');
   return { paused: false, remainingMins: 0 };
 }
 
@@ -1587,36 +1764,200 @@ async function isInSidewaysPause(
 //   return pauseUntil;
 // }
 
-async function setSidewaysPause(supabase: any): Promise<string> {
+function sanitizeSessionIdForPause(id?: string): string | null {
+  if (!id || typeof id !== 'string') return null;
+  const t = id.trim();
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(t)) return null;
+  return t;
+}
+
+function tradingDayIstNowYmd(ms: number = Date.now()): string {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date(ms));
+}
+
+/** Row for martingale_pause_events from full R3+ gate evaluation (between rounds). */
+function pauseEventRowFromSidewaysEval(args: {
+  sessionId: string | null;
+  pauseUntilIso: string;
+  reason: string;
+  niftySpot: number;
+  gateEval: SidewaysGateEval;
+  pauseKind?: string;
+}): Record<string, unknown> {
+  const ev = args.gateEval;
+  const ceRatio = ev.ce_ratio;
+  const peRatio = ev.pe_ratio;
+  const ceDrop =
+    ceRatio != null && Number.isFinite(ceRatio) && ceRatio > 0 && ceRatio <= 2
+      ? Number(((1 - Number(ceRatio)) * 100).toFixed(2))
+      : null;
+  const peDrop =
+    peRatio != null && Number.isFinite(peRatio) && peRatio > 0 && peRatio <= 2
+      ? Number(((1 - Number(peRatio)) * 100).toFixed(2))
+      : null;
+
+  return {
+    pause_until: args.pauseUntilIso,
+    pause_kind: args.pauseKind || 'sideways_gate',
+    session_id: args.sessionId,
+    reason: String(args.reason).slice(0, 1200),
+    nifty_spot: args.niftySpot,
+    nifty_range_pts: ev.nifty_range_pts ?? null,
+    range_source: ev.range_source ?? null,
+    anchor_ce_premium: ev.anchor_ce ?? null,
+    anchor_pe_premium: ev.anchor_pe ?? null,
+    otm_ce_at_pause: ev.current_ce ?? null,
+    otm_pe_at_pause: ev.current_pe ?? null,
+    otm_ce_strike: ev.current_ce_strike ?? null,
+    otm_pe_strike: ev.current_pe_strike ?? null,
+    ce_drop_pct: ceDrop,
+    pe_drop_pct: peDrop,
+    gate_round: ev.gate_round ?? null,
+    gate_eval: ev as unknown as Record<string, unknown>,
+    trading_day_ist: tradingDayIstNowYmd(),
+  };
+}
+
+/** Row when pause extended from post-pause recheck (Nifty delta or double-decay retest). */
+function pauseEventRowRecheck(args: {
+  pauseUntilIso: string;
+  reason: string;
+  niftySpot: number;
+  pauseKind: string;
+  niftyRangePts?: number | null;
+  rangeSource: string;
+  gateEval: Record<string, unknown>;
+  anchorCE?: number | null;
+  anchorPE?: number | null;
+  currentCE?: number | null;
+  currentPE?: number | null;
+  ceDropPct?: number | null;
+  peDropPct?: number | null;
+}): Record<string, unknown> {
+  return {
+    pause_until: args.pauseUntilIso,
+    pause_kind: args.pauseKind,
+    session_id: null,
+    reason: String(args.reason).slice(0, 1200),
+    nifty_spot: args.niftySpot,
+    nifty_range_pts: args.niftyRangePts === undefined ? null : args.niftyRangePts,
+    range_source: args.rangeSource,
+    anchor_ce_premium: args.anchorCE ?? null,
+    anchor_pe_premium: args.anchorPE ?? null,
+    otm_ce_at_pause: args.currentCE ?? null,
+    otm_pe_at_pause: args.currentPE ?? null,
+    ce_drop_pct: args.ceDropPct ?? null,
+    pe_drop_pct: args.peDropPct ?? null,
+    gate_round: null,
+    gate_eval: args.gateEval,
+    trading_day_ist: tradingDayIstNowYmd(),
+  };
+}
+
+function insertMartingalePauseEventFireAndForget(supabase: any, row: Record<string, unknown>): void {
+  void supabase.from('martingale_pause_events').insert(row).then(({ error }: { error: Error | null }) => {
+    if (error) console.error('martingale_pause_events insert:', error);
+  });
+}
+
+function compactPauseEventForReport(r: any): Record<string, unknown> {
+  return {
+    ist: new Date(r.recorded_at as string).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }),
+    kind: r.pause_kind,
+    nifty_spot: r.nifty_spot,
+    nifty_range_pts: r.nifty_range_pts,
+    range_src: r.range_source,
+    anchor_ce: r.anchor_ce_premium,
+    anchor_pe: r.anchor_pe_premium,
+    otm_ce: r.otm_ce_at_pause,
+    otm_pe: r.otm_pe_at_pause,
+    ce_drop_pct: r.ce_drop_pct,
+    pe_drop_pct: r.pe_drop_pct,
+    gate_r: r.gate_round,
+    reason: typeof r.reason === 'string' ? r.reason.slice(0, 300) : '',
+  };
+}
+
+function summarizePauseGateEvents(rows: any[]): Record<string, unknown> {
+  if (!rows.length) {
+    return {
+      count: 0,
+      by_kind: {},
+      avg_nifty_range_pts: null,
+      avg_ce_drop_pct: null,
+      avg_pe_drop_pct: null,
+      max_ce_drop_pct: null,
+      max_pe_drop_pct: null,
+    };
+  }
+  const byKind: Record<string, number> = {};
+  for (const r of rows) {
+    const k = String(r.pause_kind || 'unknown');
+    byKind[k] = (byKind[k] || 0) + 1;
+  }
+  const num = (xs: (number | null | undefined)[]) =>
+    xs.filter((x): x is number => x != null && !Number.isNaN(Number(x))).map(Number);
+  const ranges = num(rows.map((r) => r.nifty_range_pts));
+  const ce = num(rows.map((r) => r.ce_drop_pct));
+  const pe = num(rows.map((r) => r.pe_drop_pct));
+  const avg = (a: number[]) => (a.length ? Number((a.reduce((s, x) => s + x, 0) / a.length).toFixed(2)) : null);
+  return {
+    count: rows.length,
+    by_kind: byKind,
+    avg_nifty_range_pts: avg(ranges),
+    avg_ce_drop_pct: avg(ce),
+    avg_pe_drop_pct: avg(pe),
+    max_ce_drop_pct: ce.length ? Number(Math.max(...ce).toFixed(2)) : null,
+    max_pe_drop_pct: pe.length ? Number(Math.max(...pe).toFixed(2)) : null,
+  };
+}
+
+async function setSidewaysPause(supabase: any, pauseReason?: string): Promise<string> {
   const pauseUntil = new Date(Date.now() + SIDEWAYS_PAUSE_DURATION_MS).toISOString();
   await supabase.from('bot_settings').upsert({
     key: 'sideways_pause_until',
     value: pauseUntil,
     updated_at: new Date().toISOString(),
   }, { onConflict: 'key' });
+  if (pauseReason != null && String(pauseReason).trim()) {
+    await supabase.from('bot_settings').upsert({
+      key: 'sideways_pause_reason',
+      value: pauseReason.trim().slice(0, 900),
+      updated_at: new Date().toISOString(),
+    }, { onConflict: 'key' });
+  }
   return pauseUntil;
 }
 
 
-// Get sideways gate status for UI display
+// Sideways/decay pause window (`sideways_pause_until`) status for UI
 async function getDecayStatus(supabase: any): Promise<any> {
-  const { data } = await supabase
-    .from('bot_settings')
-    .select('value')
-    .eq('key', 'sideways_pause_until')
-    .maybeSingle();
+  const { data: rows } = await supabase.from('bot_settings').select('key, value').in('key', [
+    'sideways_pause_until',
+    'sideways_pause_reason',
+  ]);
 
-  if (!data?.value) return { active: false };
+  const until = rows?.find((r: any) => r.key === 'sideways_pause_until')?.value as string | undefined;
+  const reasonStored =
+    typeof rows?.find((r: any) => r.key === 'sideways_pause_reason')?.value === 'string'
+      ? (rows!.find((r: any) => r.key === 'sideways_pause_reason')!.value as string)
+      : undefined;
 
-  const pauseUntil = new Date(data.value).getTime();
-  const isActive = Date.now() < pauseUntil;
+  if (!until) return { active: false };
+
+  const pauseUntilMs = new Date(until).getTime();
+  const isActive = Date.now() < pauseUntilMs;
+
+  const defaultDetail =
+    'Between-round gate: low Nifty range and/or CE+PE decay vs session anchors. Next start should be fresh R1 after pause.';
 
   return {
     active: isActive,
-    pause_until: data.value,
-    remaining_mins: isActive ? Math.ceil((pauseUntil - Date.now()) / 60000) : undefined,
-    type: 'sideways_gate',
-    description: 'Between-round sideways detection (R3+ gate)',
+    pause_until: until,
+    remaining_mins: isActive ? Math.ceil((pauseUntilMs - Date.now()) / 60000) : undefined,
+    pause_kind: 'sideways_gate',
+    title: 'Paused — sideways / range / decay gate',
+    detail: reasonStored?.trim() || defaultDetail,
   };
 }
 
@@ -1690,6 +2031,8 @@ async function continueSessionFromLastLoss(
     anonKey,
     optionData.otmCEPrice,
     optionData.otmPEPrice,
+    optionData.otmCEStrike,
+    optionData.otmPEStrike,
   );
 
   if (sidewaysCheck.skip) {
@@ -1700,7 +2043,18 @@ async function continueSessionFromLastLoss(
       current_round: newRound - 1,
     }).eq('id', session.id);
 
-    const pauseUntil = await setSidewaysPause(supabase);
+    const pauseUntil = await setSidewaysPause(supabase, sidewaysCheck.reason);
+    insertMartingalePauseEventFireAndForget(
+      supabase,
+      pauseEventRowFromSidewaysEval({
+        sessionId: sanitizeSessionIdForPause(session.id),
+        pauseUntilIso: pauseUntil,
+        reason: sidewaysCheck.reason,
+        niftySpot: optionData.niftySpot,
+        gateEval: sidewaysCheck.eval,
+        pauseKind: 'sideways_gate_between_rounds',
+      }),
+    );
     // Store Nifty spot at pause time for recheck comparison
     await supabase.from('bot_settings').upsert({
       key: 'sideways_pause_nifty_spot', value: String(optionData.niftySpot), updated_at: new Date().toISOString(),
@@ -1876,15 +2230,33 @@ serve(async (req) => {
       const dailyPnl = await getDailyPnl(supabase);
       const dailyLossLimit = await getDailyLossLimit(supabase);
       const decayStatus = await getDecayStatus(supabase);
+      let decayStatusForClient = decayStatus;
+      if (decayStatusForClient.active && optionData?.otmCEPrice != null && optionData?.otmPEPrice != null) {
+        decayStatusForClient = {
+          ...decayStatusForClient,
+          ce_current: optionData.otmCEPrice,
+          pe_current: optionData.otmPEPrice,
+        };
+      }
 
       // Get pause info for UI — check both order-fill pause and sideways pause
-      let pauseInfo: { paused: boolean; pause_until?: string; reason?: string } = { paused: false };
+      let pauseInfo: {
+        paused: boolean;
+        pause_until?: string;
+        reason?: string;
+        pause_kind?: 'order_fill' | 'sideways_gate';
+      } = { paused: false };
       if (activeSession?.status === 'paused') {
         const { data: pauseData } = await supabase.from('bot_settings').select('key, value').in('key', ['pause_until', 'pause_reason']);
         if (pauseData) {
           const pauseUntil = pauseData.find((d: any) => d.key === 'pause_until')?.value;
           const pauseReason = pauseData.find((d: any) => d.key === 'pause_reason')?.value;
-          pauseInfo = { paused: true, pause_until: pauseUntil, reason: pauseReason || 'Order fill failed' };
+          pauseInfo = {
+            paused: true,
+            pause_until: pauseUntil,
+            reason: pauseReason || 'Order fill failed after retries',
+            pause_kind: 'order_fill',
+          };
         }
       }
       // Also check sideways pause (no active session but bot is paused between sessions)
@@ -1898,10 +2270,30 @@ serve(async (req) => {
           anonKey,
           statusOd?.otmCEPrice,
           statusOd?.otmPEPrice,
+          statusOd?.otmCEStrike,
+          statusOd?.otmPEStrike,
         );
         if (sidewaysPauseCheck.paused) {
-          const { data: spData } = await supabase.from('bot_settings').select('value').eq('key', 'sideways_pause_until').maybeSingle();
-          pauseInfo = { paused: true, pause_until: spData?.value, reason: 'Sideways market detected — waiting for movement' };
+          const freshDecay = await getDecayStatus(supabase);
+          let freshForClient = freshDecay;
+          if (
+            freshDecay.active &&
+            statusOd?.otmCEPrice != null &&
+            statusOd?.otmPEPrice != null
+          ) {
+            freshForClient = {
+              ...freshDecay,
+              ce_current: statusOd.otmCEPrice,
+              pe_current: statusOd.otmPEPrice,
+            };
+          }
+          decayStatusForClient = freshForClient;
+          pauseInfo = {
+            paused: true,
+            pause_until: freshDecay.pause_until,
+            reason: freshDecay.detail || freshDecay.title,
+            pause_kind: 'sideways_gate',
+          };
         }
       }
 
@@ -1922,7 +2314,7 @@ serve(async (req) => {
         all_trades: allTrades,
         daily_pnl: dailyPnl,
         daily_loss_limit: dailyLossLimit,
-        decay_status: decayStatus,
+        decay_status: decayStatusForClient,
         pause_info: pauseInfo,
         bot_running: botRunning,
       }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
@@ -1988,6 +2380,7 @@ serve(async (req) => {
 
       // Clear sideways pause on manual stop
       await supabase.from('bot_settings').delete().eq('key', 'sideways_pause_until');
+      await supabase.from('bot_settings').delete().eq('key', 'sideways_pause_reason');
 
       if (!body.keep_running) {
         await supabase.from('bot_settings').delete().eq('key', 'bot_running');
@@ -2011,6 +2404,7 @@ serve(async (req) => {
       await supabase.from('martingale_sessions').update({ status: 'stopped', completed_at: new Date().toISOString() }).eq('status', 'active');
       await supabase.from('martingale_sessions').update({ status: 'stopped', completed_at: new Date().toISOString() }).eq('status', 'paused');
       await supabase.from('bot_settings').delete().eq('key', 'sideways_pause_until');
+      await supabase.from('bot_settings').delete().eq('key', 'sideways_pause_reason');
       await supabase.from('bot_settings').delete().eq('key', 'pause_until');
       await supabase.from('bot_settings').delete().eq('key', 'bot_running');
       return new Response(JSON.stringify({ success: true, message: 'Force stopped all sessions' }), {
@@ -2102,9 +2496,26 @@ serve(async (req) => {
         });
       }
 
-      // Check for sideways pause before starting
+      const { optionData } = await fetchNiftyOptionChain(supabaseUrl, anonKey);
+      if (!optionData) {
+        return new Response(JSON.stringify({ success: false, message: 'Could not fetch option chain data' }), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+
+      // Check for sideways pause before starting (uses chain for spot/strikes on gate recheck)
       if (!skipDecayCheck) {
-        const sidewaysPause = await isInSidewaysPause(supabase, '', 0, '', '');
+        const sidewaysPause = await isInSidewaysPause(
+          supabase,
+          '',
+          optionData.niftySpot,
+          supabaseUrl,
+          anonKey,
+          optionData.otmCEPrice,
+          optionData.otmPEPrice,
+          optionData.otmCEStrike,
+          optionData.otmPEStrike,
+        );
         if (sidewaysPause.paused) {
           return new Response(JSON.stringify({ 
             success: false, 
@@ -2121,13 +2532,6 @@ serve(async (req) => {
             headers: { ...corsHeaders, 'Content-Type': 'application/json' },
           });
         }
-      }
-
-      const { optionData } = await fetchNiftyOptionChain(supabaseUrl, anonKey);
-      if (!optionData) {
-        return new Response(JSON.stringify({ success: false, message: 'Could not fetch option chain data' }), {
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        });
       }
 
       let entryOptionType = 'CE';
@@ -2326,6 +2730,8 @@ serve(async (req) => {
             anonKey,
             cronOd?.otmCEPrice,
             cronOd?.otmPEPrice,
+            cronOd?.otmCEStrike,
+            cronOd?.otmPEStrike,
           );
           let shouldStart = true;
 
@@ -2567,6 +2973,8 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
         anonKey,
         tickDecayOd?.otmCEPrice,
         tickDecayOd?.otmPEPrice,
+        tickDecayOd?.otmCEStrike,
+        tickDecayOd?.otmPEStrike,
       );
 
       if (sidewaysPause.paused) {
@@ -2599,7 +3007,26 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
                 await supabase.from('bot_settings').upsert({
                   key: 'sideways_pause_nifty_spot', value: String(optionData.niftySpot), updated_at: new Date().toISOString(),
                 }, { onConflict: 'key' });
-                const newPauseUntil = await setSidewaysPause(supabase);
+                const extendReason = `Sideways recheck: Nifty moved only ${niftyRange.toFixed(0)} pts (need ${SIDEWAYS_RECHECK_THRESHOLD} pts). Spot ${optionData.niftySpot} vs pause spot ${pauseSpot.toFixed(0)}.`;
+                const newPauseUntil = await setSidewaysPause(supabase, extendReason);
+                insertMartingalePauseEventFireAndForget(
+                  supabase,
+                  pauseEventRowRecheck({
+                    pauseUntilIso: newPauseUntil,
+                    reason: extendReason,
+                    niftySpot: optionData.niftySpot,
+                    pauseKind: 'sideways_recheck_nifty_delta',
+                    niftyRangePts: niftyRange,
+                    rangeSource: 'pause_spot_delta',
+                    gateEval: {
+                      pause_spot: pauseSpot,
+                      current_spot: optionData.niftySpot,
+                      recheck_threshold_pts: SIDEWAYS_RECHECK_THRESHOLD,
+                    },
+                    currentCE: optionData.otmCEPrice,
+                    currentPE: optionData.otmPEPrice,
+                  }),
+                );
                 await sendTelegram(`⚠️ *Sideways recheck failed*\nNifty moved only ${niftyRange.toFixed(0)}pts (need ${SIDEWAYS_RECHECK_THRESHOLD}pts). Spot: ${optionData.niftySpot} vs pause: ${pauseSpot.toFixed(0)}\nRe-pausing 15 min until ${new Date(newPauseUntil).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata' })} IST`);
                 return { success: true, message: `⚠️ Sideways recheck: Nifty range ${niftyRange.toFixed(0)}pts < ${SIDEWAYS_RECHECK_THRESHOLD}pts. Re-paused 15 min.` };
               }
@@ -2637,9 +3064,33 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
                     await supabase.from('bot_settings').upsert({
                       key: 'sideways_pause_nifty_spot', value: String(optionData.niftySpot), updated_at: new Date().toISOString(),
                     }, { onConflict: 'key' });
-                    const newPauseUntil = await setSidewaysPause(supabase);
                     const ceDecay = ((1 - ceRatio) * 100).toFixed(1);
                     const peDecay = ((1 - peRatio) * 100).toFixed(1);
+                    const extendReason = `Post-pause recheck: both OTM premiums still decaying vs anchors (CE ${ceDecay}% down, PE ${peDecay}% down).`;
+                    const newPauseUntil = await setSidewaysPause(supabase, extendReason);
+                    insertMartingalePauseEventFireAndForget(
+                      supabase,
+                      pauseEventRowRecheck({
+                        pauseUntilIso: newPauseUntil,
+                        reason: extendReason,
+                        niftySpot: optionData.niftySpot,
+                        pauseKind: 'sideways_recheck_double_decay',
+                        niftyRangePts: null,
+                        rangeSource: 'post_pause_anchor_premium',
+                        gateEval: {
+                          anchor_session_id: lastSession.id,
+                          ce_ratio: Number(ceRatio.toFixed(4)),
+                          pe_ratio: Number(peRatio.toFixed(4)),
+                          decay_ratio_gate: SIDEWAYS_PREMIUM_DECLINE_RATIO,
+                        },
+                        anchorCE,
+                        anchorPE,
+                        currentCE,
+                        currentPE,
+                        ceDropPct: Number(((1 - ceRatio) * 100).toFixed(2)),
+                        peDropPct: Number(((1 - peRatio) * 100).toFixed(2)),
+                      }),
+                    );
                     await sendTelegram(`⚠️ *Double decay still active*\nNifty moved but both premiums still decaying.\nCE: ₹${anchorCE.toFixed(0)}→₹${currentCE.toFixed(0)} (${ceDecay}% down)\nPE: ₹${anchorPE.toFixed(0)}→₹${currentPE.toFixed(0)} (${peDecay}% down)\nRe-pausing 15 min until ${new Date(newPauseUntil).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata' })} IST`);
                     return { success: true, message: `⚠️ Double decay recheck: both premiums still decaying (CE ${ceDecay}%, PE ${peDecay}%). Re-paused 15 min.` };
                   }
@@ -2976,15 +3427,25 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
         return;
       }
 
-      // GUARD 4: Check sideways pause
-      const sidewaysPause = await isInSidewaysPause(supabase, '', 0, '', '');
+      const { optionData } = await fetchNiftyOptionChain(supabaseUrl, anonKey);
+      if (!optionData) { console.log('Cannot start new session: no option data'); return; }
+
+      // GUARD 4: Check sideways pause (chain-backed recheck after timer expiry)
+      const sidewaysPause = await isInSidewaysPause(
+        supabase,
+        '',
+        optionData.niftySpot,
+        supabaseUrl,
+        anonKey,
+        optionData.otmCEPrice,
+        optionData.otmPEPrice,
+        optionData.otmCEStrike,
+        optionData.otmPEStrike,
+      );
       if (sidewaysPause.paused) {
         console.log(`New session skipped: sideways pause active (${sidewaysPause.remainingMins} min remaining)`);
         return;
       }
-
-      const { optionData } = await fetchNiftyOptionChain(supabaseUrl, anonKey);
-      if (!optionData) { console.log('Cannot start new session: no option data'); return; }
 
       let newDirection: string;
       if (lastPnl > 0) {
