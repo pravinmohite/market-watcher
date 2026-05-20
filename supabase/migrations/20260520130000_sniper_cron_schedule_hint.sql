@@ -1,0 +1,14 @@
+-- Optional: schedule martingale-bot cron-tick every minute during sniper window (Supabase Dashboard → Database → Cron, or pg_cron).
+-- Example (adjust project URL and service role key via vault):
+--
+-- SELECT cron.schedule(
+--   'martingale-sniper-morning',
+--   '*/1 4-5 * * 1-5',  -- UTC: ~9:30–10:35 IST Mon–Fri; tune for 9:35–11:00 IST = 4:05–5:30 UTC
+--   $$ SELECT net.http_post(
+--     url := 'https://YOUR_PROJECT.supabase.co/functions/v1/martingale-bot',
+--     headers := '{"Content-Type":"application/json","Authorization":"Bearer SERVICE_ROLE_KEY"}'::jsonb,
+--     body := '{"action":"cron-tick"}'::jsonb
+--   ); $$
+-- );
+--
+-- With UI open, polling every 15s also runs tick + auto-start without this cron.

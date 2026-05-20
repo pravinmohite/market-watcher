@@ -155,6 +155,91 @@ async function stopSniperBotForDay(supabase: any): Promise<void> {
   );
 }
 
+function isIstMarketDay(nowIST: Date, holidays: string[]): boolean {
+  const day = nowIST.getDay();
+  const ymd = `${nowIST.getFullYear()}-${String(nowIST.getMonth() + 1).padStart(2, '0')}-${String(nowIST.getDate()).padStart(2, '0')}`;
+  return day !== 0 && day !== 6 && !holidays.includes(ymd);
+}
+
+const NSE_HOLIDAYS_SCHED: string[] = [
+  '2025-02-26', '2025-03-14', '2025-03-31', '2025-04-10', '2025-04-14', '2025-04-18', '2025-05-01', '2025-08-12', '2025-08-15', '2025-08-27', '2025-10-02', '2025-10-20', '2025-10-21', '2025-11-05', '2025-12-25',
+  '2026-01-26', '2026-03-03', '2026-03-26', '2026-03-31', '2026-04-03', '2026-04-14', '2026-05-01', '2026-05-28', '2026-06-26', '2026-09-14', '2026-10-02', '2026-10-20', '2026-11-10', '2026-11-24', '2026-12-25',
+];
+
+/** Sniper: enable polling + auto-start first session of the day (cron or UI tick every ~15s). */
+async function trySniperAutoStartIfNeeded(
+  supabase: any,
+  supabaseUrl: string,
+  anonKey: string,
+): Promise<string | null> {
+  const strategy = await getStrategyMode(supabase);
+  if (!isSniperStrategy(strategy)) return null;
+
+  const nowIST = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+  const tickTime = nowIST.getHours() * 60 + nowIST.getMinutes();
+  if (!isIstMarketDay(nowIST, NSE_HOLIDAYS_SCHED) || !sniperInTradingWindow(tickTime)) return null;
+
+  const dailyPnl = await getDailyPnl(supabase);
+  const dailyCap = await getSniperDailyLossLimit(supabase);
+  if (dailyPnl <= -dailyCap) return 'Sniper: daily loss cap hit — no auto-start.';
+
+  await supabase.from('bot_settings').upsert(
+    { key: 'bot_running', value: 'true', updated_at: new Date().toISOString() },
+    { onConflict: 'key' },
+  );
+
+  const { data: activeSession } = await supabase
+    .from('martingale_sessions')
+    .select('id')
+    .eq('status', 'active')
+    .maybeSingle();
+  if (activeSession) return null;
+
+  if (await sniperHasSessionToday(supabase)) return null;
+
+  const { optionData: od } = await fetchNiftyOptionChain(supabaseUrl, anonKey);
+  const sidewaysPause = await isInSidewaysPause(
+    supabase,
+    '',
+    od?.niftySpot ?? 0,
+    supabaseUrl,
+    anonKey,
+    od?.otmCEPrice,
+    od?.otmPEPrice,
+    od?.otmCEStrike,
+    od?.otmPEStrike,
+  );
+  if (sidewaysPause.paused) {
+    return `Sniper auto-start skipped — sideways pause (${sidewaysPause.remainingMins} min).`;
+  }
+
+  const { data: settings } = await supabase.from('bot_settings').select('key, value');
+  let savedMode = 'paper';
+  if (settings) {
+    for (const s of settings) {
+      if (s.key === 'trading_mode') savedMode = s.value;
+    }
+  }
+
+  const startRes = await fetch(`${supabaseUrl}/functions/v1/martingale-bot`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${anonKey}` },
+    body: JSON.stringify({
+      action: 'start',
+      trading_mode: savedMode,
+      max_rounds: SNIPER_MAX_ROUNDS,
+      strategy_mode: STRATEGY_SNIPER,
+      skip_decay_check: true,
+    }),
+  });
+  const startData = await startRes.json();
+  if (startData.success) {
+    await sendTelegram(`⏰ *Sniper Auto-Start*\n${startData.message || 'Session started in 9:35–11:00 window'}`);
+    return `Sniper auto-started: ${startData.message || 'ok'}`;
+  }
+  return `Sniper auto-start failed: ${startData.message || JSON.stringify(startData)}`;
+}
+
 async function completeSniperSession(
   supabase: any,
   sessionId: string,
@@ -2957,9 +3042,13 @@ serve(async (req) => {
       const isMarketDay = schedDay !== 0 && schedDay !== 6 && !NSE_HOLIDAYS.includes(schedYMD);
       const isExpiryDay = schedDay === 2;
 
-      const AUTO_START_1 = 9 * 60 + 25;
-      const AUTO_STOP_1  = 11 * 60 + 15;
-      const AUTO_START_2 = 14 * 60 + 30;
+      const schedStrategy = await getStrategyMode(supabase);
+      const schedSniper = isSniperStrategy(schedStrategy);
+
+      const MARTINGALE_AUTO_START_1 = 9 * 60 + 25;
+      const MARTINGALE_AUTO_STOP_1 = 11 * 60 + 15;
+      const MARTINGALE_AUTO_START_2 = 14 * 60 + 30;
+      const SNIPER_AUTO_STOP = SNIPER_WINDOW_END_MIN; // 11:00 IST
 
       const { data: existingSession } = await supabase
         .from('martingale_sessions')
@@ -2968,14 +3057,23 @@ serve(async (req) => {
         .maybeSingle();
 
       const dailyPnlSched = await getDailyPnl(supabase);
-      const dailyLossLimitSched = await getDailyLossLimit(supabase);
+      const dailyLossLimitSched = schedSniper
+        ? await getSniperDailyLossLimit(supabase)
+        : await getDailyLossLimit(supabase);
       const isDailyLossHit = dailyPnlSched <= -dailyLossLimitSched;
 
-      if (isMarketDay && !isDailyLossHit &&
-          ((schedTime >= AUTO_START_1 && schedTime < AUTO_START_1 + 1) ||
-           (!isExpiryDay && schedTime >= AUTO_START_2 && schedTime < AUTO_START_2 + 1))) {
+      const inSniperSchedWindow = sniperInTradingWindow(schedTime);
+
+      if (schedSniper && isMarketDay && inSniperSchedWindow && !isDailyLossHit) {
+        const sniperStartMsg = await trySniperAutoStartIfNeeded(supabase, supabaseUrl, anonKey);
+        if (sniperStartMsg) tickResults.push(sniperStartMsg);
+      } else if (
+        isMarketDay &&
+        !isDailyLossHit &&
+        ((schedTime >= MARTINGALE_AUTO_START_1 && schedTime < MARTINGALE_AUTO_START_1 + 1) ||
+          (!isExpiryDay && schedTime >= MARTINGALE_AUTO_START_2 && schedTime < MARTINGALE_AUTO_START_2 + 1))
+      ) {
         if (!existingSession) {
-          // Check for sideways pause before auto-starting
           const { optionData: cronOd } = await fetchNiftyOptionChain(supabaseUrl, anonKey);
           const sidewaysPause = await isInSidewaysPause(
             supabase,
@@ -2989,12 +3087,10 @@ serve(async (req) => {
             cronOd?.otmPEStrike,
           );
           let shouldStart = true;
-
           if (sidewaysPause.paused) {
             shouldStart = false;
             tickResults.push(`⚠️ Sideways pause active. Skipping auto-start. ${sidewaysPause.remainingMins} min remaining.`);
           }
-
           if (shouldStart) {
             const { data: settings } = await supabase.from('bot_settings').select('key, value');
             let savedMode = 'paper';
@@ -3005,22 +3101,43 @@ serve(async (req) => {
                 if (s.key === 'max_rounds') savedMaxRounds = Math.min(Math.max(parseInt(s.value) || DEFAULT_MAX_ROUNDS, 1), 10);
               }
             }
-
             const startRes = await fetch(`${supabaseUrl}/functions/v1/martingale-bot`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${anonKey}` },
-              body: JSON.stringify({ action: 'start', trading_mode: savedMode, max_rounds: savedMaxRounds, skip_decay_check: true }),
+              body: JSON.stringify({
+                action: 'start',
+                trading_mode: savedMode,
+                max_rounds: savedMaxRounds,
+                strategy_mode: STRATEGY_MARTINGALE,
+                skip_decay_check: true,
+              }),
             });
             const startData = await startRes.json();
-            const timeLabel = schedTime >= AUTO_START_2 ? '2:30 PM' : '9:25 AM';
+            const timeLabel = schedTime >= MARTINGALE_AUTO_START_2 ? '2:30 PM' : '9:25 AM';
             tickResults.push(`⏰ Auto-start (${timeLabel}): ${startData.message || 'started'}`);
             await sendTelegram(`⏰ *Auto-Start (${timeLabel})*\n${startData.message || 'Bot started automatically'}`);
           }
         }
       }
 
-      // Auto square-off + stop at 11:15 AM
-      if (schedTime >= AUTO_STOP_1 && schedTime < AUTO_STOP_1 + 1) {
+      // --- Auto-stop at end of morning window ---
+      if (schedSniper) {
+        if (schedTime >= SNIPER_AUTO_STOP && schedTime < SNIPER_AUTO_STOP + 1) {
+          if (existingSession) {
+            const stopRes = await fetch(`${supabaseUrl}/functions/v1/martingale-bot`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${anonKey}` },
+              body: JSON.stringify({ action: 'stop' }),
+            });
+            const stopData = await stopRes.json();
+            tickResults.push(`⏰ Sniper auto-stop (11:00 AM): ${stopData.message || 'stopped'}`);
+            await sendTelegram(`⏰ *Sniper Auto-Stop (11:00)*\nMorning window ended — bot stopped.`);
+          } else {
+            await stopSniperBotForDay(supabase);
+            tickResults.push('⏰ Sniper: 11:00 AM — bot_running cleared for the day.');
+          }
+        }
+      } else if (schedTime >= MARTINGALE_AUTO_STOP_1 && schedTime < MARTINGALE_AUTO_STOP_1 + 1) {
         if (existingSession) {
           const stopRes = await fetch(`${supabaseUrl}/functions/v1/martingale-bot`, {
             method: 'POST',
@@ -3079,6 +3196,11 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
 
     if (!isMarketDayTick) {
       return { action: `⛔ Market closed today (${tickYMD}, day=${tickDay}). Skipping tick.` };
+    }
+
+    const sniperAutoMsg = await trySniperAutoStartIfNeeded(supabase, supabaseUrl, anonKey);
+    if (sniperAutoMsg) {
+      return { success: true, action: sniperAutoMsg };
     }
 
     const tickHour = nowIST_tick.getHours();

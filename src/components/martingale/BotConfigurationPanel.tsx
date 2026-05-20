@@ -212,8 +212,8 @@ export function BotConfigurationPanel({
             </ConfigField>
 
             <div className="sm:col-span-2 lg:col-span-3 text-[11px] text-muted-foreground border-t border-border/60 pt-2">
-              Sniper: one session per day · 9:35–11:00 IST · max R2 · R2 only if R1 stops out and trend is sideways ·
-              no up+CE · no afternoon trades.
+              Sniper: auto-starts <strong className="text-foreground">9:35–11:00 IST</strong> via cron (if scheduled) or when this page polls every 15s ·
+              exits on TP/SL · one session/day · max R2 · no up+CE · stops at 11:00.
             </div>
           </>
         )}

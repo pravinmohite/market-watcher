@@ -23,6 +23,9 @@ import {
   type BotSettingsMap,
 } from "@/lib/bot-settings";
 
+/** UI + tick poll interval (must match cron tick spacing for open trades). */
+const MARTINGALE_POLL_MS = 15_000;
+
 const Martingale = () => {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
@@ -120,8 +123,9 @@ const Martingale = () => {
       if (error) throw error;
       return statusData;
     },
-    refetchInterval: 15000,
+    refetchInterval: MARTINGALE_POLL_MS,
     refetchIntervalInBackground: true,
+    staleTime: 0,
   });
 
   const connectUpstox = useMutation({
@@ -311,8 +315,8 @@ const Martingale = () => {
       },
       {
         id: "stopped",
-        label: "Bot stopped (ready for new sniper session)",
-        status: !isActive && !isPaused ? "pass" : "pending",
+        label: "No active session (auto-start at 9:35 if cron/UI polling is on)",
+        status: !isActive && !isPaused ? "pass" : "fail",
       },
     ];
   }, [
@@ -450,8 +454,8 @@ const Martingale = () => {
               ) : (
                 <Button
                   onClick={() => {
-                    if (botSettings.strategy_mode === "sniper" && !sniperReadyToStart) {
-                      toast.error("Sniper checklist not complete — see pre-flight panel below.");
+                    if (botSettings.strategy_mode === "sniper" && !sniperReadyToStart && !data?.bot_running) {
+                      toast.error("Sniper checklist not complete — wait for 9:35 window or fix failed checks.");
                       return;
                     }
                     if (botSettings.trading_mode === 'actual') {
@@ -462,7 +466,10 @@ const Martingale = () => {
                       startBot.mutate();
                     }
                   }}
-                  disabled={startBot.isPending || (botSettings.strategy_mode === "sniper" && !sniperReadyToStart)}
+                  disabled={
+                    startBot.isPending ||
+                    (botSettings.strategy_mode === "sniper" && !sniperReadyToStart && !data?.bot_running)
+                  }
                   size="sm"
                   className={cn("gap-1 md:gap-1.5 h-8 px-2 md:px-3 text-xs", botSettings.trading_mode === 'actual' && "bg-loss hover:bg-loss/90")}
                 >
@@ -595,6 +602,7 @@ const Martingale = () => {
                 ₹{dailyPnl.toFixed(0)}
               </span>
               <span className="text-muted-foreground"> / -₹{(effectiveDailyLossLimit/1000).toFixed(0)}K</span>
+              <span className="hidden sm:inline text-muted-foreground"> · poll {MARTINGALE_POLL_MS / 1000}s</span>
             </span>
           </div>
         </div>
