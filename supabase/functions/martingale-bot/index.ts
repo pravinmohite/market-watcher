@@ -7,8 +7,8 @@ const corsHeaders = {
 };
 
 const LOT_SIZE = 65;
-const PROFIT_TARGET = 2.5;
-const LOSS_LIMIT = 2;
+const DEFAULT_PROFIT_TARGET_PCT = 2.5;
+const DEFAULT_STOP_LOSS_PCT = 1.5;
 const DEFAULT_MAX_ROUNDS = 5;
 const DEFAULT_DAILY_LOSS_LIMIT = 12000;
 const ORDER_FILL_MAX_RETRIES = 3;
@@ -33,6 +33,146 @@ const SIDEWAYS_STRIKE_SHIFT_TOLERANCE = 100; // points allowed between anchor an
 const SIDEWAYS_PAUSE_DURATION_MS = 15 * 60 * 1000;
 const SIDEWAYS_MIN_ROUND = 3;
 const SIDEWAYS_PAUSE_DURATION_MIN = SIDEWAYS_PAUSE_DURATION_MS / 60000;
+
+/** Mode 1 — one session/day, max R2, morning only (see strategy_mode bot_setting). */
+const STRATEGY_MARTINGALE = 'martingale';
+const STRATEGY_SNIPER = 'sniper';
+const SNIPER_MAX_ROUNDS = 2;
+const SNIPER_WINDOW_START_MIN = 9 * 60 + 35; // 9:35 IST
+const SNIPER_WINDOW_END_MIN = 11 * 60 + 0; // 11:00 IST
+const SNIPER_SESSION_LOSS_CAP_DEFAULT = 1200;
+const SNIPER_DAILY_LOSS_LIMIT_DEFAULT = 3000;
+
+function parsePositiveFloat(val: unknown, fallback: number): number {
+  const n = typeof val === 'string' || typeof val === 'number' ? parseFloat(String(val)) : NaN;
+  return !Number.isNaN(n) && n > 0 ? n : fallback;
+}
+
+async function loadBotSettingsMap(supabase: any): Promise<Record<string, string>> {
+  const { data } = await supabase.from('bot_settings').select('key, value');
+  const map: Record<string, string> = {};
+  for (const row of data || []) {
+    if (row?.key) map[row.key] = String(row.value ?? '');
+  }
+  return map;
+}
+
+async function getProfitTargetPct(supabase: any): Promise<number> {
+  const map = await loadBotSettingsMap(supabase);
+  return parsePositiveFloat(map.profit_target_pct, DEFAULT_PROFIT_TARGET_PCT);
+}
+
+async function getStopLossPct(supabase: any): Promise<number> {
+  const map = await loadBotSettingsMap(supabase);
+  return parsePositiveFloat(map.stop_loss_pct, DEFAULT_STOP_LOSS_PCT);
+}
+
+async function getSniperSessionLossCap(supabase: any): Promise<number> {
+  const map = await loadBotSettingsMap(supabase);
+  const n = parsePositiveFloat(map.sniper_session_loss_cap, SNIPER_SESSION_LOSS_CAP_DEFAULT);
+  return Math.round(n);
+}
+
+async function getSniperDailyLossLimit(supabase: any): Promise<number> {
+  const map = await loadBotSettingsMap(supabase);
+  const sniper = parsePositiveFloat(map.sniper_daily_loss_limit, 0);
+  if (sniper > 0) return Math.round(sniper);
+  const shared = parsePositiveFloat(map.daily_loss_limit, SNIPER_DAILY_LOSS_LIMIT_DEFAULT);
+  return Math.round(shared);
+}
+
+async function getBotConfigForStatus(supabase: any): Promise<Record<string, unknown>> {
+  const map = await loadBotSettingsMap(supabase);
+  const strategyMode = map.strategy_mode === STRATEGY_SNIPER ? STRATEGY_SNIPER : STRATEGY_MARTINGALE;
+  return {
+    strategy_mode: strategyMode,
+    trading_mode: map.trading_mode === 'actual' ? 'actual' : 'paper',
+    max_rounds: Math.min(10, Math.max(1, parseInt(map.max_rounds || String(DEFAULT_MAX_ROUNDS), 10) || DEFAULT_MAX_ROUNDS)),
+    profit_target_pct: parsePositiveFloat(map.profit_target_pct, DEFAULT_PROFIT_TARGET_PCT),
+    stop_loss_pct: parsePositiveFloat(map.stop_loss_pct, DEFAULT_STOP_LOSS_PCT),
+    daily_loss_limit: Math.round(parsePositiveFloat(map.daily_loss_limit, DEFAULT_DAILY_LOSS_LIMIT)),
+    sniper_session_loss_cap: Math.round(parsePositiveFloat(map.sniper_session_loss_cap, SNIPER_SESSION_LOSS_CAP_DEFAULT)),
+    sniper_daily_loss_limit: Math.round(
+      parsePositiveFloat(map.sniper_daily_loss_limit, SNIPER_DAILY_LOSS_LIMIT_DEFAULT),
+    ),
+    sniper_window_ist: '9:35–11:00',
+    sniper_max_rounds: SNIPER_MAX_ROUNDS,
+  };
+}
+
+async function countSessionsTodayIst(supabase: any): Promise<number> {
+  const todayUTC = istTodayUtcStart();
+  const { count, error } = await supabase
+    .from('martingale_sessions')
+    .select('id', { count: 'exact', head: true })
+    .gte('created_at', todayUTC.toISOString());
+  if (error) {
+    console.error('countSessionsTodayIst:', error);
+    return 0;
+  }
+  return count ?? 0;
+}
+
+async function getStrategyMode(supabase: any): Promise<string> {
+  const { data } = await supabase.from('bot_settings').select('value').eq('key', 'strategy_mode').maybeSingle();
+  return data?.value === STRATEGY_SNIPER ? STRATEGY_SNIPER : STRATEGY_MARTINGALE;
+}
+
+function isSniperStrategy(mode: string): boolean {
+  return mode === STRATEGY_SNIPER;
+}
+
+function sniperInTradingWindow(timeMin: number): boolean {
+  return timeMin >= SNIPER_WINDOW_START_MIN && timeMin < SNIPER_WINDOW_END_MIN;
+}
+
+function istTodayUtcStart(): Date {
+  const nowIST = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+  const todayStart = new Date(nowIST);
+  todayStart.setHours(0, 0, 0, 0);
+  return new Date(todayStart.getTime() - 5.5 * 60 * 60 * 1000);
+}
+
+async function sniperHasSessionToday(supabase: any): Promise<boolean> {
+  const todayUTC = istTodayUtcStart();
+  const { data } = await supabase
+    .from('martingale_sessions')
+    .select('id')
+    .gte('created_at', todayUTC.toISOString())
+    .limit(1);
+  return !!(data && data.length > 0);
+}
+
+/** Block worst bucket from sample: long CE when spot trend is up. */
+function sniperLegBlocked(optionType: string, trend: string): boolean {
+  return trend === 'up' && optionType === 'CE';
+}
+
+async function stopSniperBotForDay(supabase: any): Promise<void> {
+  await supabase.from('bot_settings').upsert(
+    { key: 'bot_running', value: 'false', updated_at: new Date().toISOString() },
+    { onConflict: 'key' },
+  );
+}
+
+async function completeSniperSession(
+  supabase: any,
+  sessionId: string,
+  status: string,
+  sessionTotalPnl: number,
+  currentRound?: number,
+): Promise<void> {
+  await supabase
+    .from('martingale_sessions')
+    .update({
+      status,
+      total_pnl: sessionTotalPnl,
+      completed_at: new Date().toISOString(),
+      ...(currentRound != null ? { current_round: currentRound } : {}),
+    })
+    .eq('id', sessionId);
+  await stopSniperBotForDay(supabase);
+}
 
 type SidewaysGateEval = {
   gate_round: number;
@@ -294,6 +434,8 @@ async function insertMartingaleOpenTrade(
   },
 ): Promise<{ error: any | null }> {
   const entryTimeIso = new Date().toISOString();
+  const profitTargetPct = await getProfitTargetPct(supabase);
+  const stopLossPct = await getStopLossPct(supabase);
   const streak = await getStreakBeforeEntry(supabase, entryTimeIso);
   const priorSpots = await fetchSessionSpotTrail(supabase, p.session_id);
   const market = buildEntryMarketSnapshot(p.nifty_spot, p.atm_strike, priorSpots);
@@ -308,9 +450,9 @@ async function insertMartingaleOpenTrade(
       trade_side: `${p.option_type}` as string,
       strike_price: p.strike_price,
       martingale_step: p.round,
-      target_pct_snapshot: PROFIT_TARGET,
-      stop_loss_pct_snapshot: LOSS_LIMIT,
-      target_pct_ui: `%+${PROFIT_TARGET} TP / -${LOSS_LIMIT}% SL on premium`,
+      target_pct_snapshot: profitTargetPct,
+      stop_loss_pct_snapshot: stopLossPct,
+      target_pct_ui: `%+${profitTargetPct} TP / -${stopLossPct}% SL on premium`,
       market,
       entry_reason_rule_tag: p.entry_reason_tag,
       sideways_gate_eval: p.sideways_gate_eval ?? null,
@@ -328,8 +470,8 @@ async function insertMartingaleOpenTrade(
     status: 'open',
     nifty_spot: p.nifty_spot,
     symbol,
-    target_pct: PROFIT_TARGET,
-    stop_loss_pct: LOSS_LIMIT,
+    target_pct: profitTargetPct,
+    stop_loss_pct: stopLossPct,
     position_qty: positionQty,
     streak_wins_before: streak.streak_wins_before,
     streak_losses_before: streak.streak_losses_before,
@@ -1396,11 +1538,12 @@ async function shouldSkipNextRound(
   currentPEPrice?: number,
   currentCEStrike?: number,
   currentPEStrike?: number,
+  minRoundGate: number = SIDEWAYS_MIN_ROUND,
 ): Promise<{ skip: boolean; reason: string; eval: SidewaysGateEval }> {
-  if (nextRound < SIDEWAYS_MIN_ROUND) {
+  if (nextRound < minRoundGate) {
     return {
       skip: false,
-      reason: `R${nextRound}: allowed (<R${SIDEWAYS_MIN_ROUND})`,
+      reason: `R${nextRound}: allowed (<R${minRoundGate})`,
       eval: {
         gate_round: nextRound,
         last_two_losses: false,
@@ -1971,8 +2114,10 @@ async function continueSessionFromLastLoss(
 ): Promise<{ success: boolean; action?: string; message?: string; telegramText?: string }> {
   const isActual = tradingMode === 'actual';
   const modeLabel = isActual ? '🔴' : '📝';
+  const strategyMode = await getStrategyMode(supabase);
+  const sniper = isSniperStrategy(strategyMode);
   const lastLossRound = Number(lastLossTrade?.round) || Number(session.current_round) || 1;
-  const maxRounds = Number(session.max_rounds) || DEFAULT_MAX_ROUNDS;
+  const maxRounds = sniper ? SNIPER_MAX_ROUNDS : (Number(session.max_rounds) || DEFAULT_MAX_ROUNDS);
 
   const { data: existingOpenTrade } = await supabase
     .from('martingale_trades')
@@ -2001,19 +2146,25 @@ async function continueSessionFromLastLoss(
 
   const newRound = lastLossRound + 1;
   if (newRound > maxRounds) {
-    const action = `${modeLabel} ⛔ MAX ROUNDS (${maxRounds}) reached. Session P&L: ₹${sessionTotalPnl.toFixed(0)}. Bot stopped — manual restart required.`;
+    const action = sniper
+      ? `${modeLabel} 🎯 Sniper day done — R${maxRounds} loss. Session P&L: ₹${sessionTotalPnl.toFixed(0)}. No more trades today.`
+      : `${modeLabel} ⛔ MAX ROUNDS (${maxRounds}) reached. Session P&L: ₹${sessionTotalPnl.toFixed(0)}. Bot stopped — manual restart required.`;
 
-    await supabase.from('martingale_sessions').update({
-      status: 'max_rounds_reached',
-      total_pnl: sessionTotalPnl,
-      completed_at: new Date().toISOString(),
-      current_round: lastLossRound,
-    }).eq('id', session.id);
+    if (sniper) {
+      await completeSniperSession(supabase, session.id, 'sniper_max_rounds', sessionTotalPnl, lastLossRound);
+    } else {
+      await supabase.from('martingale_sessions').update({
+        status: 'max_rounds_reached',
+        total_pnl: sessionTotalPnl,
+        completed_at: new Date().toISOString(),
+        current_round: lastLossRound,
+      }).eq('id', session.id);
+    }
 
     return {
       success: true,
       action,
-      telegramText: `📊 *Martingale Bot*\n\n${action}`,
+      telegramText: `📊 *${sniper ? 'Sniper' : 'Martingale'} Bot*\n\n${action}`,
     };
   }
 
@@ -2022,6 +2173,17 @@ async function continueSessionFromLastLoss(
     return { success: false, message: `Could not fetch new option data for round ${newRound}` };
   }
 
+  const entryTrend = classifyTrendVsAtm(optionData.niftySpot, optionData.atmStrike);
+
+  if (sniper && newRound === 2) {
+    if (entryTrend !== 'sideways') {
+      const action = `${modeLabel} 🎯 Sniper: R2 skipped — trend is "${entryTrend}" (need sideways after R1 loss). Session P&L: ₹${sessionTotalPnl.toFixed(0)}. Done for today.`;
+      await completeSniperSession(supabase, session.id, 'sniper_r2_trend_block', sessionTotalPnl, lastLossRound);
+      return { success: true, action, telegramText: `📊 *Sniper Bot*\n\n${action}` };
+    }
+  }
+
+  const gateMinRound = sniper ? 2 : SIDEWAYS_MIN_ROUND;
   const sidewaysCheck = await shouldSkipNextRound(
     supabase,
     session.id,
@@ -2033,9 +2195,16 @@ async function continueSessionFromLastLoss(
     optionData.otmPEPrice,
     optionData.otmCEStrike,
     optionData.otmPEStrike,
+    gateMinRound,
   );
 
   if (sidewaysCheck.skip) {
+    if (sniper) {
+      const action = `${modeLabel} 🎯 Sniper: gate blocked R${newRound} (${sidewaysCheck.reason}). Session P&L: ₹${sessionTotalPnl.toFixed(0)}. Done for today.`;
+      await completeSniperSession(supabase, session.id, 'sniper_gate_skip', sessionTotalPnl, newRound - 1);
+      return { success: true, action, telegramText: `📊 *Sniper Bot*\n\n${action}` };
+    }
+
     await supabase.from('martingale_sessions').update({
       status: 'sideways_skipped',
       total_pnl: sessionTotalPnl,
@@ -2069,7 +2238,13 @@ async function continueSessionFromLastLoss(
   }
 
   const newOptionType = lastLossTrade.option_type === 'CE' ? 'PE' : 'CE';
-  const newLots = Math.pow(2, newRound - 1);
+  if (sniper && sniperLegBlocked(newOptionType, entryTrend)) {
+    const action = `${modeLabel} 🎯 Sniper: blocked ${newOptionType} in uptrend. Session P&L: ₹${sessionTotalPnl.toFixed(0)}. Done for today.`;
+    await completeSniperSession(supabase, session.id, 'sniper_up_ce_block', sessionTotalPnl, lastLossRound);
+    return { success: true, action, telegramText: `📊 *Sniper Bot*\n\n${action}` };
+  }
+
+  const newLots = sniper && newRound === 2 ? 2 : Math.pow(2, newRound - 1);
   const newStrike = newOptionType === 'CE' ? optionData.otmCEStrike : optionData.otmPEStrike;
   const newPrice = newOptionType === 'CE' ? optionData.otmCEPrice : optionData.otmPEPrice;
   const newInstrKey = newOptionType === 'CE' ? optionData.otmCEInstrumentKey : optionData.otmPEInstrumentKey;
@@ -2127,14 +2302,16 @@ async function continueSessionFromLastLoss(
     entry_price: actualRoundPrice,
     nifty_spot: optionData.niftySpot,
     atm_strike: optionData.atmStrike,
-    entry_reason_tag: 'martingale_flip_after_loss_round',
+    entry_reason_tag: sniper ? 'sniper_r2_after_r1_loss_sideways' : 'martingale_flip_after_loss_round',
     sideways_gate_eval: sidewaysCheck.eval,
   });
   if (insErr) {
     console.error('insertMartingaleOpenTrade:', insErr);
   }
 
-  const action = `${modeLabel} 🔄 Round ${newRound}: Resumed from last loss. Flipped to ${newLots} lots ${newStrike} ${newOptionType} @ ₹${actualRoundPrice.toFixed(2)}`;
+  const action = sniper
+    ? `${modeLabel} 🎯 Sniper R${newRound}: ${newLots} lots ${newStrike} ${newOptionType} @ ₹${actualRoundPrice.toFixed(2)} (sideways recovery)`
+    : `${modeLabel} 🔄 Round ${newRound}: Resumed from last loss. Flipped to ${newLots} lots ${newStrike} ${newOptionType} @ ₹${actualRoundPrice.toFixed(2)}`;
   return {
     success: true,
     action,
@@ -2299,6 +2476,12 @@ serve(async (req) => {
 
       const { data: botRunningData } = await supabase.from('bot_settings').select('value').eq('key', 'bot_running').maybeSingle();
       const botRunning = botRunningData?.value === 'true';
+      const strategyMode = await getStrategyMode(supabase);
+      const botConfig = await getBotConfigForStatus(supabase);
+      const sessionsToday = await countSessionsTodayIst(supabase);
+      const nowIstStatus = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+      const statusTimeMin = nowIstStatus.getHours() * 60 + nowIstStatus.getMinutes();
+      const sniperInWindow = sniperInTradingWindow(statusTimeMin);
 
       // If bot is running but outside trading windows, don't show pause indicator
       // Only show pause indicators during trading windows
@@ -2313,10 +2496,29 @@ serve(async (req) => {
         recent_sessions: recentSessions || [],
         all_trades: allTrades,
         daily_pnl: dailyPnl,
-        daily_loss_limit: dailyLossLimit,
+        daily_loss_limit: isSniperStrategy(strategyMode)
+          ? await getSniperDailyLossLimit(supabase)
+          : dailyLossLimit,
         decay_status: decayStatusForClient,
         pause_info: pauseInfo,
         bot_running: botRunning,
+        strategy_mode: strategyMode,
+        bot_config: botConfig,
+        sniper_status: isSniperStrategy(strategyMode)
+          ? {
+              sessions_today: sessionsToday,
+              in_trading_window: sniperInWindow,
+              window_ist: '9:35–11:00',
+            }
+          : null,
+        sniper_config: isSniperStrategy(strategyMode)
+          ? {
+              max_rounds: SNIPER_MAX_ROUNDS,
+              window_ist: '9:35–11:00',
+              session_loss_cap_inr: botConfig.sniper_session_loss_cap,
+              daily_loss_cap_inr: botConfig.sniper_daily_loss_limit,
+            }
+          : null,
       }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
     }
 
@@ -2453,8 +2655,19 @@ serve(async (req) => {
 
     if (action === 'start') {
       const tradingMode = body.trading_mode || 'paper';
-      const maxRounds = Math.min(Math.max(parseInt(body.max_rounds) || DEFAULT_MAX_ROUNDS, 1), 10);
       const skipDecayCheck = body.skip_decay_check === true; // Allow manual override
+
+      if (body.strategy_mode === STRATEGY_SNIPER || body.strategy_mode === STRATEGY_MARTINGALE) {
+        await supabase.from('bot_settings').upsert(
+          { key: 'strategy_mode', value: body.strategy_mode, updated_at: new Date().toISOString() },
+          { onConflict: 'key' },
+        );
+      }
+      const strategyMode = await getStrategyMode(supabase);
+      const sniper = isSniperStrategy(strategyMode);
+
+      let maxRounds = Math.min(Math.max(parseInt(body.max_rounds) || DEFAULT_MAX_ROUNDS, 1), 10);
+      if (sniper) maxRounds = SNIPER_MAX_ROUNDS;
 
       const nowIST_start = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
       const startHour = nowIST_start.getHours();
@@ -2463,7 +2676,20 @@ serve(async (req) => {
       const mktOpen = 9 * 60 + 15;
       const mktClose = 15 * 60 + 30;
 
-      if (startTime < mktOpen || startTime > mktClose) {
+      if (sniper) {
+        if (!sniperInTradingWindow(startTime)) {
+          return new Response(JSON.stringify({
+            success: false,
+            message: `Sniper mode: trade only 9:35–11:00 IST. Now ${startHour}:${String(startMinute).padStart(2, '0')} IST.`,
+          }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
+        if (await sniperHasSessionToday(supabase)) {
+          return new Response(JSON.stringify({
+            success: false,
+            message: 'Sniper mode: one session per day already used. Try again tomorrow.',
+          }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
+      } else if (startTime < mktOpen || startTime > mktClose) {
         return new Response(JSON.stringify({ success: false, message: `Cannot start outside market hours (9:15 AM - 3:30 PM IST). Current time: ${startHour}:${String(startMinute).padStart(2, '0')} IST` }), {
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         });
@@ -2535,37 +2761,60 @@ serve(async (req) => {
       }
 
       let entryOptionType = 'CE';
+      let hadPriorSession = false;
 
-      const { data: lastSession } = await supabase
-        .from('martingale_sessions')
-        .select('id, status')
-        .neq('status', 'active')
-        .order('created_at', { ascending: false })
-        .limit(1)
-        .maybeSingle();
-
-      if (lastSession) {
-        const { data: lastTrade } = await supabase
-          .from('martingale_trades')
-          .select('option_type, pnl')
-          .eq('session_id', lastSession.id)
-          .order('entry_time', { ascending: false })
+      if (sniper) {
+        if (optionData.niftySpot < optionData.atmStrike) {
+          entryOptionType = 'PE';
+        } else if (optionData.niftySpot > optionData.atmStrike) {
+          entryOptionType = 'CE';
+        } else {
+          entryOptionType = 'PE';
+        }
+        const startTrend = classifyTrendVsAtm(optionData.niftySpot, optionData.atmStrike);
+        if (sniperLegBlocked(entryOptionType, startTrend)) {
+          entryOptionType = entryOptionType === 'CE' ? 'PE' : 'CE';
+        }
+        if (sniperLegBlocked(entryOptionType, startTrend)) {
+          return new Response(JSON.stringify({
+            success: false,
+            message: 'Sniper mode: skip today — only up+CE would be available (blocked).',
+          }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
+        console.log(`Sniper R1 start: spot=${optionData.niftySpot}, atm=${optionData.atmStrike}, trend=${startTrend}, leg=${entryOptionType}`);
+      } else {
+        const { data: lastSession } = await supabase
+          .from('martingale_sessions')
+          .select('id, status')
+          .neq('status', 'active')
+          .order('created_at', { ascending: false })
           .limit(1)
           .maybeSingle();
 
-        if (lastTrade) {
-          if (lastTrade.pnl !== null && lastTrade.pnl > 0) {
-            entryOptionType = lastTrade.option_type;
-          } else {
-            entryOptionType = lastTrade.option_type === 'CE' ? 'PE' : 'CE';
+        hadPriorSession = !!lastSession;
+        if (lastSession) {
+          const { data: lastTrade } = await supabase
+            .from('martingale_trades')
+            .select('option_type, pnl')
+            .eq('session_id', lastSession.id)
+            .order('entry_time', { ascending: false })
+            .limit(1)
+            .maybeSingle();
+
+          if (lastTrade) {
+            if (lastTrade.pnl !== null && lastTrade.pnl > 0) {
+              entryOptionType = lastTrade.option_type;
+            } else {
+              entryOptionType = lastTrade.option_type === 'CE' ? 'PE' : 'CE';
+            }
+            console.log(`Direction from last session: lastTrade=${lastTrade.option_type}, pnl=${lastTrade.pnl}, chosen=${entryOptionType}`);
           }
-          console.log(`Direction from last session: lastTrade=${lastTrade.option_type}, pnl=${lastTrade.pnl}, chosen=${entryOptionType}`);
+        } else {
+          if (optionData.niftySpot < optionData.atmStrike) {
+            entryOptionType = 'PE';
+          }
+          console.log(`First session, trend-based: spot=${optionData.niftySpot}, atm=${optionData.atmStrike}, chosen=${entryOptionType}`);
         }
-      } else {
-        if (optionData.niftySpot < optionData.atmStrike) {
-          entryOptionType = 'PE';
-        }
-        console.log(`First session, trend-based: spot=${optionData.niftySpot}, atm=${optionData.atmStrike}, chosen=${entryOptionType}`);
       }
 
       const entryStrike = entryOptionType === 'CE' ? optionData.otmCEStrike : optionData.otmPEStrike;
@@ -2652,7 +2901,11 @@ serve(async (req) => {
         .single();
       if (sessErr) throw sessErr;
 
-      const startTag = lastSession ? 'session_start_carry_direction_from_prior' : 'session_start_first_trend_ce_pe';
+      const startTag = sniper
+        ? 'sniper_r1_session_start'
+        : hadPriorSession
+          ? 'session_start_carry_direction_from_prior'
+          : 'session_start_first_trend_ce_pe';
       const { error: tradeErr } = await insertMartingaleOpenTrade(supabase, {
         session_id: session.id,
         round: 1,
@@ -2669,10 +2922,12 @@ serve(async (req) => {
       await supabase.from('bot_settings').upsert({ key: 'bot_running', value: 'true', updated_at: new Date().toISOString() }, { onConflict: 'key' });
 
       const modeLabel = tradingMode === 'actual' ? '🔴 ACTUAL' : '📝 Paper';
+      const stratLabel = sniper ? 'Sniper' : 'Martingale';
       return new Response(JSON.stringify({
         success: true,
-        message: `${modeLabel} Started! Bought 1 lot ${entryStrike} ${entryOptionType} @ ₹${entryPrice}`,
+        message: `${modeLabel} ${stratLabel} started — 1 lot ${entryStrike} ${entryOptionType} @ ₹${entryPrice}${sniper ? ' (max R2, 9:35–11:00)' : ''}`,
         session,
+        strategy_mode: strategyMode,
       }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
     }
 
@@ -2836,10 +3091,13 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
     const WINDOW_2_START = 14 * 60 + 30;
     const WINDOW_2_END = 15 * 60 + 25;
     const isExpiryDayTick = tickDay === 2;
+    const tickStrategyMode = await getStrategyMode(supabase);
+    const tickSniper = isSniperStrategy(tickStrategyMode);
     const inWindow1 = tickTime >= WINDOW_1_START && tickTime <= WINDOW_1_END;
     // On expiry day (Tuesday) the afternoon window 2:30–3:25 PM is disabled
-    const inWindow2 = !isExpiryDayTick && tickTime >= WINDOW_2_START && tickTime <= WINDOW_2_END;
-    const inTradingWindow = inWindow1 || inWindow2;
+    const inWindow2 = !tickSniper && !isExpiryDayTick && tickTime >= WINDOW_2_START && tickTime <= WINDOW_2_END;
+    const inSniperWindow = tickSniper && sniperInTradingWindow(tickTime);
+    const inTradingWindow = tickSniper ? inSniperWindow : (inWindow1 || inWindow2);
 
     if (!inTradingWindow) {
       // If there are active sessions outside windows, square them ALL off
@@ -3139,11 +3397,16 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
           return { success: true, message: 'Session created recently, skipping auto-restart' };
         }
 
-        const inMorningWindow = tickTime >= (9 * 60 + 25) && tickTime <= (11 * 60 + 15);
-        const inAfternoonWindow = !isExpiryDayTick && tickTime >= (14 * 60 + 30) && tickTime <= (15 * 60 + 25);
-        if (inMorningWindow || inAfternoonWindow) {
+        const autoStrat = await getStrategyMode(supabase);
+        const autoSniper = isSniperStrategy(autoStrat);
+        const inMorningWindow = autoSniper
+          ? sniperInTradingWindow(tickTime)
+          : tickTime >= (9 * 60 + 25) && tickTime <= (11 * 60 + 15);
+        const inAfternoonWindow = !autoSniper && !isExpiryDayTick && tickTime >= (14 * 60 + 30) && tickTime <= (15 * 60 + 25);
+        const canAutoStartToday = !autoSniper || !(await sniperHasSessionToday(supabase));
+        if ((inMorningWindow || inAfternoonWindow) && canAutoStartToday) {
           const dailyPnl = await getDailyPnl(supabase);
-          const dailyLimit = await getDailyLossLimit(supabase);
+          const dailyLimit = autoSniper ? await getSniperDailyLossLimit(supabase) : await getDailyLossLimit(supabase);
           if (dailyPnl > -dailyLimit) {
             const { data: settings } = await supabase.from('bot_settings').select('key, value');
             let savedMode = 'paper';
@@ -3154,16 +3417,24 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
                 if (s.key === 'max_rounds') savedMaxRounds = Math.min(Math.max(parseInt(s.value) || DEFAULT_MAX_ROUNDS, 1), 10);
               }
             }
+            if (autoSniper) savedMaxRounds = SNIPER_MAX_ROUNDS;
             const startRes = await fetch(`${supabaseUrl}/functions/v1/martingale-bot`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${anonKey}` },
-              body: JSON.stringify({ action: 'start', trading_mode: savedMode, max_rounds: savedMaxRounds }),
+              body: JSON.stringify({
+                action: 'start',
+                trading_mode: savedMode,
+                max_rounds: savedMaxRounds,
+                strategy_mode: autoStrat,
+              }),
             });
             const startData = await startRes.json();
             return { success: true, action: `▶️ Auto-restarted: ${startData.message || 'new session'}` };
           } else {
             return { success: true, message: `⚠️ Bot watching — daily loss limit hit` };
           }
+        } else if (autoSniper && !canAutoStartToday) {
+          return { success: true, message: '⏸️ Sniper: today\'s session already used' };
         } else {
           return { success: true, message: `⏸️ Bot watching — outside trading window` };
         }
@@ -3229,6 +3500,8 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
 
     const tradingMode = activeSession.trading_mode || 'paper';
     const isActual = tradingMode === 'actual';
+    const strategyMode = await getStrategyMode(supabase);
+    const sniper = isSniperStrategy(strategyMode);
 
     const { data: openTrade } = await supabase
       .from('martingale_trades')
@@ -3316,7 +3589,7 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
 
     // Check daily loss limit
     const dailyPnlCheck = await getDailyPnl(supabase);
-    const dailyLossLimitCheck = await getDailyLossLimit(supabase);
+    const dailyLossLimitCheck = sniper ? await getSniperDailyLossLimit(supabase) : await getDailyLossLimit(supabase);
     const runningSessionPnl = activeSession.total_pnl;
     const { optionData: odMon, specificPrice: checkPrice, specificInstrumentKey: checkInstrKey } = await fetchNiftyOptionChain(
       supabaseUrl, anonKey, openTrade.strike_price, openTrade.option_type, openTrade.nifty_spot, openTrade.entry_price,
@@ -3387,10 +3660,47 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
     const pnlAmount = checkPnlAmount;
     let actionTaken = `Monitoring: ${openTrade.option_type} ${openTrade.strike_price} @ ₹${currentPrice} (${pnlPercent.toFixed(2)}%)`;
 
+    if (sniper) {
+      const sniperSessionCap = await getSniperSessionLossCap(supabase);
+      const { data: closedForCap } = await supabase
+        .from('martingale_trades')
+        .select('pnl')
+        .eq('session_id', activeSession.id)
+        .eq('status', 'closed');
+      const sessionPnlLive = (closedForCap || []).reduce((s: number, t: any) => s + (Number(t.pnl) || 0), 0) + pnlAmount;
+      if (sessionPnlLive <= -sniperSessionCap) {
+        const exitIsoCap = new Date().toISOString();
+        await supabase.from('martingale_trades').update(
+          finalizeTradeClosePatch(openTrade, currentPrice, exitIsoCap, pnlAmount, 'sniper_session_loss_cap'),
+        ).eq('id', openTrade.id).eq('status', 'open');
+        if (isActual && currentInstrKey) {
+          const accessToken = await getUpstoxToken(supabase);
+          if (accessToken) {
+            await placeUpstoxOrder(accessToken, {
+              instrumentKey: currentInstrKey,
+              quantity: openTrade.lots * LOT_SIZE,
+              transactionType: 'SELL',
+              price: currentPrice,
+            });
+          }
+        }
+        await completeSniperSession(supabase, activeSession.id, 'sniper_session_loss_cap', sessionPnlLive, openTrade.round);
+        const modeLabel = isActual ? '🔴' : '📝';
+        return {
+          success: true,
+          action: `${modeLabel} 🎯 Sniper session loss cap (₹${sniperSessionCap}). Squared off. Done for today.`,
+        };
+      }
+    }
+
     // (Mid-session decay check removed — the -2% stop loss handles intra-round exits.
     //  Sideways detection now happens between rounds at R3+ entry.)
 
     async function startNewSession(lastOptionType: string, lastPnl: number) {
+      if (sniper) {
+        console.log('Sniper: no auto-chain after take-profit — done for today');
+        return;
+      }
       // GUARD 1: Check if we're still in a trading window (use < for end boundary to prevent starting at exact square-off time)
       const nowCheck = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
       const checkTime = nowCheck.getHours() * 60 + nowCheck.getMinutes();
@@ -3533,8 +3843,13 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
       }
     }
 
+    const profitTargetPct =
+      Number(openTrade.target_pct) > 0 ? Number(openTrade.target_pct) : await getProfitTargetPct(supabase);
+    const stopLossPct =
+      Number(openTrade.stop_loss_pct) > 0 ? Number(openTrade.stop_loss_pct) : await getStopLossPct(supabase);
+
     // Check profit target
-    if (pnlPercent >= PROFIT_TARGET) {
+    if (pnlPercent >= profitTargetPct) {
       const exitIsoTp = new Date().toISOString();
       const { data: closeResult } = await supabase.from('martingale_trades').update(
         finalizeTradeClosePatch(openTrade, currentPrice, exitIsoTp, pnlAmount, 'profit_target_pct'),
@@ -3555,17 +3870,25 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
         }
       }
 
-      await supabase.from('martingale_sessions').update({
-        status: 'completed', total_pnl: activeSession.total_pnl + pnlAmount, completed_at: new Date().toISOString(),
-      }).eq('id', activeSession.id);
+      const sessionPnlAfterWin = (Number(activeSession.total_pnl) || 0) + pnlAmount;
+      if (sniper) {
+        await completeSniperSession(supabase, activeSession.id, 'sniper_completed_win', sessionPnlAfterWin, openTrade.round);
+        const modeLabel = isActual ? '🔴' : '📝';
+        actionTaken = `${modeLabel} 🎯 Sniper PROFIT! ${openTrade.option_type} ${openTrade.strike_price} @ ₹${currentPrice} (+${pnlPercent.toFixed(1)}%, ₹${pnlAmount.toFixed(0)}). Done for today.`;
+        await sendTelegram(`🎯 *Sniper Bot - PROFIT*\n\n${actionTaken}`);
+      } else {
+        await supabase.from('martingale_sessions').update({
+          status: 'completed', total_pnl: sessionPnlAfterWin, completed_at: new Date().toISOString(),
+        }).eq('id', activeSession.id);
 
-      await startNewSession(openTrade.option_type, pnlAmount);
-      const modeLabel = isActual ? '🔴' : '📝';
-      actionTaken = `${modeLabel} 🎯 PROFIT! Exited ${openTrade.option_type} ${openTrade.strike_price} @ ₹${currentPrice} (+${pnlPercent.toFixed(1)}%, ₹${pnlAmount.toFixed(0)}). New session started.`;
-      await sendTelegram(`🎯 *Martingale Bot - PROFIT*\n\n${actionTaken}`);
+        await startNewSession(openTrade.option_type, pnlAmount);
+        const modeLabel = isActual ? '🔴' : '📝';
+        actionTaken = `${modeLabel} 🎯 PROFIT! Exited ${openTrade.option_type} ${openTrade.strike_price} @ ₹${currentPrice} (+${pnlPercent.toFixed(1)}%, ₹${pnlAmount.toFixed(0)}). New session started.`;
+        await sendTelegram(`🎯 *Martingale Bot - PROFIT*\n\n${actionTaken}`);
+      }
     }
     // Check loss limit
-    else if (pnlPercent <= -LOSS_LIMIT) {
+    else if (pnlPercent <= -stopLossPct) {
       const exitIsoSl = new Date().toISOString();
       const { data: closeResult } = await supabase.from('martingale_trades').update(
         finalizeTradeClosePatch(openTrade, currentPrice, exitIsoSl, pnlAmount, 'stop_loss_pct'),

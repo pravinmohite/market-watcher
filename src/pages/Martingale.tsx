@@ -3,11 +3,25 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
 import { Play, Square, RefreshCw, Zap, TrendingUp, TrendingDown, ArrowLeftRight, AlertTriangle, DollarSign, Activity, ArrowLeft, Link2, Unlink, Calendar, Filter, LogOut, BarChart3 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Switch } from "@/components/ui/switch";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { Link, useSearchParams, useNavigate } from "react-router-dom";
+import { BotConfigurationPanel } from "@/components/martingale/BotConfigurationPanel";
+import { SniperChecklistPanel, type ChecklistItem } from "@/components/martingale/SniperChecklistPanel";
+import {
+  parseBotSettings,
+  upsertBotSetting,
+  BOT_SETTING_KEYS,
+  DEFAULT_PROFIT_TARGET_PCT,
+  DEFAULT_STOP_LOSS_PCT,
+  DEFAULT_MAX_ROUNDS,
+  DEFAULT_DAILY_LOSS_LIMIT,
+  DEFAULT_SNIPER_SESSION_LOSS_CAP,
+  DEFAULT_SNIPER_DAILY_LOSS_LIMIT,
+  sniperInWindowNow,
+  type BotSettingsMap,
+} from "@/lib/bot-settings";
 
 const Martingale = () => {
   const queryClient = useQueryClient();
@@ -56,11 +70,18 @@ const Martingale = () => {
     refetchInterval: 60000,
   });
 
-  const [tradingMode, setTradingMode] = useState<'paper' | 'actual'>('paper');
-  const [maxRounds, setMaxRounds] = useState<number>(5);
-  const [dailyLossLimit, setDailyLossLimit] = useState<number>(12000);
+  const defaultBotSettings: BotSettingsMap = {
+    trading_mode: "paper",
+    strategy_mode: "sniper",
+    max_rounds: DEFAULT_MAX_ROUNDS,
+    profit_target_pct: DEFAULT_PROFIT_TARGET_PCT,
+    stop_loss_pct: DEFAULT_STOP_LOSS_PCT,
+    daily_loss_limit: DEFAULT_DAILY_LOSS_LIMIT,
+    sniper_session_loss_cap: DEFAULT_SNIPER_SESSION_LOSS_CAP,
+    sniper_daily_loss_limit: DEFAULT_SNIPER_DAILY_LOSS_LIMIT,
+  };
+  const [botSettings, setBotSettings] = useState<BotSettingsMap>(defaultBotSettings);
 
-  // Load saved settings from database
   const { data: savedSettings } = useQuery({
     queryKey: ["bot-settings"],
     queryFn: async () => {
@@ -72,12 +93,15 @@ const Martingale = () => {
 
   useEffect(() => {
     if (savedSettings) {
-      const map = Object.fromEntries(savedSettings.map((s) => [s.key, s.value]));
-      if (map.trading_mode === 'paper' || map.trading_mode === 'actual') setTradingMode(map.trading_mode);
-      if (map.max_rounds) setMaxRounds(Number(map.max_rounds));
-      if (map.daily_loss_limit) setDailyLossLimit(Number(map.daily_loss_limit));
+      setBotSettings(parseBotSettings(savedSettings));
     }
   }, [savedSettings]);
+
+  const persistSetting = async (key: string, value: string, patch: Partial<BotSettingsMap>) => {
+    setBotSettings((prev) => ({ ...prev, ...patch }));
+    await upsertBotSetting(key, value);
+    queryClient.invalidateQueries({ queryKey: ["martingale-status"] });
+  };
   const [lastTickAction, setLastTickAction] = useState<string | null>(null);
 
   const { data, isLoading, refetch } = useQuery({
@@ -119,7 +143,12 @@ const Martingale = () => {
   const startBot = useMutation({
     mutationFn: async () => {
       const { data, error } = await supabase.functions.invoke("martingale-bot", {
-        body: { action: "start", trading_mode: tradingMode, max_rounds: maxRounds },
+        body: {
+          action: "start",
+          trading_mode: botSettings.trading_mode,
+          max_rounds: botSettings.strategy_mode === "sniper" ? 2 : botSettings.max_rounds,
+          strategy_mode: botSettings.strategy_mode,
+        },
       });
       if (error) throw error;
       return data;
@@ -176,7 +205,27 @@ const Martingale = () => {
   const isUpstoxConnected = upstoxStatus?.connected;
   const dataSource = optionData?.source;
   const dailyPnl = data?.daily_pnl ?? 0;
-  const serverDailyLossLimit = data?.daily_loss_limit ?? dailyLossLimit;
+  const serverBotConfig = data?.bot_config as BotSettingsMap | undefined;
+  const sniperStatus = data?.sniper_status as
+    | { sessions_today?: number; in_trading_window?: boolean; window_ist?: string }
+    | undefined;
+
+  useEffect(() => {
+    if (serverBotConfig) {
+      setBotSettings((prev) => ({
+        ...prev,
+        ...serverBotConfig,
+        trading_mode: serverBotConfig.trading_mode ?? prev.trading_mode,
+        strategy_mode: serverBotConfig.strategy_mode ?? prev.strategy_mode,
+      }));
+    }
+  }, [serverBotConfig?.profit_target_pct, serverBotConfig?.stop_loss_pct, serverBotConfig?.strategy_mode]);
+
+  const effectiveDailyLossLimit =
+    botSettings.strategy_mode === "sniper"
+      ? (data?.daily_loss_limit ?? botSettings.sniper_daily_loss_limit)
+      : (data?.daily_loss_limit ?? botSettings.daily_loss_limit);
+
   const decayStatus = data?.decay_status as
     | {
         active?: boolean;
@@ -197,7 +246,6 @@ const Martingale = () => {
       }
     | undefined;
 
-  /** Order-fill pause from API, or sideways/decay pause from pause_info / decay_status (same yellow banner). */
   const pauseBanner = useMemo(() => {
     if (pauseInfo?.paused) return pauseInfo;
     if (decayStatus?.active && decayStatus.pause_until) {
@@ -213,6 +261,74 @@ const Martingale = () => {
     }
     return null;
   }, [pauseInfo, decayStatus]);
+
+  const profitTargetPct =
+    Number(activeTrade?.target_pct) > 0
+      ? Number(activeTrade?.target_pct)
+      : (serverBotConfig?.profit_target_pct ?? botSettings.profit_target_pct);
+  const stopLossPct =
+    Number(activeTrade?.stop_loss_pct) > 0
+      ? Number(activeTrade?.stop_loss_pct)
+      : (serverBotConfig?.stop_loss_pct ?? botSettings.stop_loss_pct);
+
+  const sniperChecklist = useMemo((): ChecklistItem[] => {
+    if (botSettings.strategy_mode !== "sniper") return [];
+    const sessionsToday = sniperStatus?.sessions_today ?? 0;
+    const inWindow = sniperStatus?.in_trading_window ?? sniperInWindowNow();
+    const paused = !!(pauseBanner?.paused || decayStatus?.active);
+    const dailyOk = dailyPnl > -effectiveDailyLossLimit;
+    const upstoxOk = botSettings.trading_mode !== "actual" || !!isUpstoxConnected;
+    const sessionSlotOk = sessionsToday < 1 && !isActive;
+
+    return [
+      {
+        id: "window",
+        label: "Inside 9:35–11:00 IST sniper window",
+        detail: sniperStatus?.window_ist ?? "9:35–11:00",
+        status: inWindow ? "pass" : "fail",
+      },
+      {
+        id: "session",
+        label: "No session used yet today (max 1/day)",
+        detail: `${sessionsToday} session(s) today`,
+        status: sessionSlotOk ? "pass" : "fail",
+      },
+      {
+        id: "pause",
+        label: "No sideways / decay pause active",
+        status: !paused ? "pass" : "fail",
+      },
+      {
+        id: "daily",
+        label: `Daily PnL above -₹${effectiveDailyLossLimit.toLocaleString("en-IN")} cap`,
+        detail: `Today: ₹${dailyPnl.toFixed(0)}`,
+        status: dailyOk ? "pass" : "fail",
+      },
+      {
+        id: "upstox",
+        label: botSettings.trading_mode === "actual" ? "Upstox connected (actual mode)" : "Paper mode (no broker required)",
+        status: upstoxOk ? "pass" : "fail",
+      },
+      {
+        id: "stopped",
+        label: "Bot stopped (ready for new sniper session)",
+        status: !isActive && !isPaused ? "pass" : "pending",
+      },
+    ];
+  }, [
+    botSettings.strategy_mode,
+    botSettings.trading_mode,
+    sniperStatus,
+    pauseBanner?.paused,
+    decayStatus?.active,
+    dailyPnl,
+    effectiveDailyLossLimit,
+    isUpstoxConnected,
+    isActive,
+    isPaused,
+  ]);
+
+  const sniperReadyToStart = sniperChecklist.length > 0 && sniperChecklist.every((i) => i.status === "pass");
 
   const botRunning = data?.bot_running;
 
@@ -292,61 +408,18 @@ const Martingale = () => {
                 <p className="text-[10px] md:text-xs text-muted-foreground truncate">
                   {activeSession?.trading_mode === 'actual' ? (
                     <span className="text-loss font-medium">🔴 Actual Trading</span>
-                  ) : tradingMode === 'actual' ? (
+                  ) : botSettings.trading_mode === 'actual' ? (
                     <span className="text-loss font-medium">🔴 Actual Mode Selected</span>
                   ) : (
                     'Paper Trading'
-                  )} • Nifty Weekly
+                  )}
+                  {" • "}
+                  {botSettings.strategy_mode === "sniper" ? "Sniper daily" : "Martingale"}
+                  {" • Nifty Weekly"}
                 </p>
               </div>
             </div>
             <div className="flex items-center gap-1.5 md:gap-3 shrink-0">
-              {/* Settings inline on desktop only */}
-              {!isActive && (
-                <div className="hidden md:flex items-center gap-3">
-                  <div className="flex items-center gap-2">
-                    <span className={cn("text-xs font-medium", tradingMode === 'paper' ? "text-foreground" : "text-muted-foreground")}>Paper</span>
-                    <Switch
-                      checked={tradingMode === 'actual'}
-                      onCheckedChange={(checked) => {
-                        if (checked) {
-                          if (!isUpstoxConnected) {
-                            toast.error("Connect Upstox first before enabling actual trading");
-                            return;
-                          }
-                          toast.warning("⚠️ Actual trading mode: Real orders will be placed on your Upstox account!", { duration: 5000 });
-                        }
-                        const mode = checked ? 'actual' : 'paper'; setTradingMode(mode); supabase.from("bot_settings" as any).upsert({ key: 'trading_mode', value: mode } as any, { onConflict: 'key' }).then();
-                      }}
-                    />
-                    <span className={cn("text-xs font-medium", tradingMode === 'actual' ? "text-loss" : "text-muted-foreground")}>Actual</span>
-                  </div>
-                  <div className="flex items-center gap-1.5">
-                    <span className="text-xs text-muted-foreground">Rounds:</span>
-                    <select
-                      value={maxRounds}
-                      onChange={(e) => { const v = Number(e.target.value); setMaxRounds(v); supabase.from("bot_settings" as any).upsert({ key: 'max_rounds', value: String(v) } as any, { onConflict: 'key' }).then(); }}
-                      className="text-xs bg-muted border border-border rounded px-1.5 py-0.5 text-foreground"
-                    >
-                      {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(n => (
-                        <option key={n} value={n}>{n}</option>
-                      ))}
-                    </select>
-                  </div>
-                  <div className="flex items-center gap-1.5">
-                    <span className="text-xs text-muted-foreground">Loss:</span>
-                    <select
-                      value={dailyLossLimit}
-                      onChange={(e) => { const v = Number(e.target.value); setDailyLossLimit(v); supabase.from("bot_settings" as any).upsert({ key: 'daily_loss_limit', value: String(v) } as any, { onConflict: 'key' }).then(); }}
-                      className="text-xs bg-muted border border-border rounded px-1.5 py-0.5 text-foreground"
-                    >
-                      {[5000, 8000, 10000, 12000, 15000, 20000, 25000, 30000].map(n => (
-                        <option key={n} value={n}>₹{(n/1000).toFixed(0)}K</option>
-                      ))}
-                    </select>
-                  </div>
-                </div>
-              )}
               {isActive && activeSession?.trading_mode && (
                 <span className={cn(
                   "px-1.5 md:px-2 py-0.5 md:py-1 rounded-full text-[10px] md:text-xs font-medium",
@@ -377,7 +450,11 @@ const Martingale = () => {
               ) : (
                 <Button
                   onClick={() => {
-                    if (tradingMode === 'actual') {
+                    if (botSettings.strategy_mode === "sniper" && !sniperReadyToStart) {
+                      toast.error("Sniper checklist not complete — see pre-flight panel below.");
+                      return;
+                    }
+                    if (botSettings.trading_mode === 'actual') {
                       if (confirm('⚠️ You are about to start ACTUAL TRADING. Real orders will be placed on your Upstox account. Continue?')) {
                         startBot.mutate();
                       }
@@ -385,12 +462,12 @@ const Martingale = () => {
                       startBot.mutate();
                     }
                   }}
-                  disabled={startBot.isPending}
+                  disabled={startBot.isPending || (botSettings.strategy_mode === "sniper" && !sniperReadyToStart)}
                   size="sm"
-                  className={cn("gap-1 md:gap-1.5 h-8 px-2 md:px-3 text-xs", tradingMode === 'actual' && "bg-loss hover:bg-loss/90")}
+                  className={cn("gap-1 md:gap-1.5 h-8 px-2 md:px-3 text-xs", botSettings.trading_mode === 'actual' && "bg-loss hover:bg-loss/90")}
                 >
                   <Play className="w-3 h-3 md:w-3.5 md:h-3.5" />
-                  {startBot.isPending ? "..." : tradingMode === 'actual' ? "Start LIVE" : "Start"}
+                  {startBot.isPending ? "..." : botSettings.trading_mode === 'actual' ? "Start LIVE" : "Start"}
                 </Button>
               )}
               <Button
@@ -407,52 +484,6 @@ const Martingale = () => {
               </Button>
             </div>
           </div>
-          {/* Settings row - mobile only */}
-          {!isActive && (
-            <div className="flex md:hidden flex-wrap items-center gap-x-4 gap-y-2 mt-2 pt-2 border-t border-border/50">
-              <div className="flex items-center gap-2">
-                <span className={cn("text-xs font-medium", tradingMode === 'paper' ? "text-foreground" : "text-muted-foreground")}>Paper</span>
-                <Switch
-                  checked={tradingMode === 'actual'}
-                  onCheckedChange={(checked) => {
-                    if (checked) {
-                      if (!isUpstoxConnected) {
-                        toast.error("Connect Upstox first before enabling actual trading");
-                        return;
-                      }
-                      toast.warning("⚠️ Actual trading mode: Real orders will be placed on your Upstox account!", { duration: 5000 });
-                    }
-                    const mode = checked ? 'actual' : 'paper'; setTradingMode(mode); supabase.from("bot_settings" as any).upsert({ key: 'trading_mode', value: mode } as any, { onConflict: 'key' }).then();
-                  }}
-                />
-                <span className={cn("text-xs font-medium", tradingMode === 'actual' ? "text-loss" : "text-muted-foreground")}>Actual</span>
-              </div>
-              <div className="flex items-center gap-1.5">
-                <span className="text-xs text-muted-foreground">Rounds:</span>
-                <select
-                  value={maxRounds}
-                  onChange={(e) => { const v = Number(e.target.value); setMaxRounds(v); supabase.from("bot_settings" as any).upsert({ key: 'max_rounds', value: String(v) } as any, { onConflict: 'key' }).then(); }}
-                  className="text-xs bg-muted border border-border rounded px-1.5 py-0.5 text-foreground"
-                >
-                  {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(n => (
-                    <option key={n} value={n}>{n}</option>
-                  ))}
-                </select>
-              </div>
-              <div className="flex items-center gap-1.5">
-                <span className="text-xs text-muted-foreground">Loss Limit:</span>
-                <select
-                  value={dailyLossLimit}
-                  onChange={(e) => { const v = Number(e.target.value); setDailyLossLimit(v); supabase.from("bot_settings" as any).upsert({ key: 'daily_loss_limit', value: String(v) } as any, { onConflict: 'key' }).then(); }}
-                  className="text-xs bg-muted border border-border rounded px-1.5 py-0.5 text-foreground"
-                >
-                  {[5000, 8000, 10000, 12000, 15000, 20000, 25000, 30000].map(n => (
-                    <option key={n} value={n}>₹{(n/1000).toFixed(0)}K</option>
-                  ))}
-                </select>
-              </div>
-            </div>
-          )}
         </div>
       </header>
 
@@ -499,6 +530,43 @@ const Martingale = () => {
           )}
         </div>
 
+        <BotConfigurationPanel
+          settings={botSettings}
+          disabled={isActive || isPaused}
+          isUpstoxConnected={isUpstoxConnected}
+          onTradingModeChange={(mode) => {
+            if (mode === "actual" && !isUpstoxConnected) {
+              toast.error("Connect Upstox first");
+              return;
+            }
+            if (mode === "actual") {
+              toast.warning("Actual mode places real Upstox orders.", { duration: 5000 });
+            }
+            void persistSetting(BOT_SETTING_KEYS.trading_mode, mode, { trading_mode: mode });
+          }}
+          onStrategyChange={(mode) => void persistSetting(BOT_SETTING_KEYS.strategy_mode, mode, { strategy_mode: mode })}
+          onMaxRoundsChange={(n) => void persistSetting(BOT_SETTING_KEYS.max_rounds, String(n), { max_rounds: n })}
+          onProfitTargetChange={(pct) =>
+            void persistSetting(BOT_SETTING_KEYS.profit_target_pct, String(pct), { profit_target_pct: pct })
+          }
+          onStopLossChange={(pct) =>
+            void persistSetting(BOT_SETTING_KEYS.stop_loss_pct, String(pct), { stop_loss_pct: pct })
+          }
+          onDailyLossLimitChange={(inr) =>
+            void persistSetting(BOT_SETTING_KEYS.daily_loss_limit, String(inr), { daily_loss_limit: inr })
+          }
+          onSniperSessionCapChange={(inr) =>
+            void persistSetting(BOT_SETTING_KEYS.sniper_session_loss_cap, String(inr), { sniper_session_loss_cap: inr })
+          }
+          onSniperDailyLossChange={(inr) =>
+            void persistSetting(BOT_SETTING_KEYS.sniper_daily_loss_limit, String(inr), { sniper_daily_loss_limit: inr })
+          }
+        />
+
+        {botSettings.strategy_mode === "sniper" && (
+          <SniperChecklistPanel items={sniperChecklist} readyToStart={sniperReadyToStart} />
+        )}
+
         {/* Status Banner */}
         <div className={cn(
           "rounded-xl border p-3 md:p-4",
@@ -526,7 +594,7 @@ const Martingale = () => {
               Today: <span className={cn("font-mono font-medium", dailyPnl >= 0 ? "text-gain" : "text-loss")}>
                 ₹{dailyPnl.toFixed(0)}
               </span>
-              <span className="text-muted-foreground"> / -₹{(serverDailyLossLimit/1000).toFixed(0)}K</span>
+              <span className="text-muted-foreground"> / -₹{(effectiveDailyLossLimit/1000).toFixed(0)}K</span>
             </span>
           </div>
         </div>
@@ -643,18 +711,18 @@ const Martingale = () => {
               {currentPnl !== null && (
                 <div className="mt-3">
                   <div className="flex justify-between text-xs text-muted-foreground mb-1">
-                    <span>-2% (Exit)</span>
+                    <span>-{stopLossPct}% (Exit)</span>
                     <span>0%</span>
-                    <span>+2.5% (Target)</span>
+                    <span>+{profitTargetPct}% (Target)</span>
                   </div>
                   <div className="h-2 bg-muted rounded-full relative overflow-hidden">
                     <div
                       className={cn("absolute h-full rounded-full transition-all", currentPnl >= 0 ? "bg-gain" : "bg-loss")}
                       style={{
-                        left: currentPnl >= 0 ? '40%' : `${Math.max(0, 40 + (currentPnl / 2) * 40)}%`,
+                        left: currentPnl >= 0 ? '40%' : `${Math.max(0, 40 + (currentPnl / stopLossPct) * 40)}%`,
                         width: currentPnl >= 0
-                          ? `${Math.min((currentPnl / 2.5) * 60, 60)}%`
-                          : `${Math.min(Math.abs(currentPnl / 2) * 40, 40)}%`,
+                          ? `${Math.min((currentPnl / profitTargetPct) * 60, 60)}%`
+                          : `${Math.min(Math.abs(currentPnl / stopLossPct) * 40, 40)}%`,
                       }}
                     />
                   </div>
@@ -671,16 +739,33 @@ const Martingale = () => {
             Strategy Rules
           </h2>
           <div className="grid md:grid-cols-2 gap-2 md:gap-3 text-xs md:text-sm text-muted-foreground">
-            <div className="space-y-1.5 md:space-y-2">
-              <p>1️⃣ Smart entry: <strong className="text-foreground">follows last winning direction</strong></p>
-              <p>2️⃣ If <span className="text-loss font-medium">-2%</span> → exit, <strong className="text-foreground">flip & double</strong></p>
-              <p>3️⃣ Continue (max <strong className="text-foreground">{isActive ? activeSession?.max_rounds : maxRounds} rounds</strong>)</p>
-            </div>
-            <div className="space-y-1.5 md:space-y-2">
-              <p>🎯 <span className="text-gain font-medium">+2.5%</span> profit → exit & restart</p>
-              <p>⛔ Max rounds → <strong className="text-foreground">bot stops</strong></p>
-              <p>🕒 Auto square-off at <strong className="text-foreground">3:25 PM</strong></p>
-            </div>
+            {botSettings.strategy_mode === "sniper" ? (
+              <>
+                <div className="space-y-1.5 md:space-y-2">
+                  <p>1️⃣ <strong className="text-foreground">One session/day</strong> · 9:35–11:00 IST · R1 probe (1 lot)</p>
+                  <p>2️⃣ If <span className="text-loss font-medium">-{stopLossPct}%</span> on R1 and trend is <strong className="text-foreground">sideways</strong> → R2 flip (2 lots)</p>
+                  <p>3️⃣ If R2 loses or gate blocks → <strong className="text-foreground">done for the day</strong> (no R3+)</p>
+                </div>
+                <div className="space-y-1.5 md:space-y-2">
+                  <p>🎯 <span className="text-gain font-medium">+{profitTargetPct}%</span> → exit, bot stops for day</p>
+                  <p>⛔ Session cap ₹{botSettings.sniper_session_loss_cap.toLocaleString("en-IN")} · Daily cap ₹{botSettings.sniper_daily_loss_limit.toLocaleString("en-IN")}</p>
+                  <p>🚫 No <strong className="text-foreground">up+CE</strong> · no afternoon window</p>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="space-y-1.5 md:space-y-2">
+                  <p>1️⃣ Smart entry: <strong className="text-foreground">follows last winning direction</strong></p>
+                  <p>2️⃣ If <span className="text-loss font-medium">-{stopLossPct}%</span> → exit, <strong className="text-foreground">flip & double</strong></p>
+                  <p>3️⃣ Continue (max <strong className="text-foreground">{isActive ? activeSession?.max_rounds : botSettings.max_rounds} rounds</strong>)</p>
+                </div>
+                <div className="space-y-1.5 md:space-y-2">
+                  <p>🎯 <span className="text-gain font-medium">+{profitTargetPct}%</span> profit → exit & restart</p>
+                  <p>⛔ Max rounds → <strong className="text-foreground">bot stops</strong></p>
+                  <p>🕒 Auto square-off at <strong className="text-foreground">3:25 PM</strong></p>
+                </div>
+              </>
+            )}
           </div>
         </section>
 
