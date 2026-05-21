@@ -3199,7 +3199,7 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
     }
 
     const sniperAutoMsg = await trySniperAutoStartIfNeeded(supabase, supabaseUrl, anonKey);
-    if (sniperAutoMsg) {
+    if (sniperAutoMsg?.startsWith('Sniper auto-started:')) {
       return { success: true, action: sniperAutoMsg };
     }
 
