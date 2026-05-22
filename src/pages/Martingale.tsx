@@ -19,6 +19,7 @@ import {
   DEFAULT_DAILY_LOSS_LIMIT,
   DEFAULT_SNIPER_SESSION_LOSS_CAP,
   DEFAULT_SNIPER_DAILY_LOSS_LIMIT,
+  shouldInvokeMartingaleTick,
   sniperInWindowNow,
   type BotSettingsMap,
 } from "@/lib/bot-settings";
@@ -110,12 +111,29 @@ const Martingale = () => {
   const { data, isLoading, refetch } = useQuery({
     queryKey: ["martingale-status"],
     queryFn: async () => {
-      const { data: tickData } = await supabase.functions.invoke("martingale-bot", {
-        body: { action: "tick", source: "ui" },
+      const prev = queryClient.getQueryData<{ bot_running?: boolean; active_session?: unknown }>([
+        "martingale-status",
+      ]);
+      const runTick = shouldInvokeMartingaleTick(botSettings.strategy_mode, {
+        botRunning: prev?.bot_running,
+        hasActiveSession: !!prev?.active_session,
       });
-      if (tickData?.action && tickData.action !== lastTickAction && !tickData.action.startsWith('Monitoring') && !tickData.action.startsWith('Skipped') && !tickData.action.startsWith('Outside') && !tickData.message?.startsWith('Outside')) {
-        setLastTickAction(tickData.action);
-        toast.info(tickData.action);
+      if (runTick) {
+        const { data: tickData } = await supabase.functions.invoke("martingale-bot", {
+          body: { action: "tick", source: "ui" },
+        });
+        if (
+          tickData?.action &&
+          tickData.action !== lastTickAction &&
+          !tickData.action.startsWith("Monitoring") &&
+          !tickData.action.startsWith("Skipped") &&
+          !tickData.action.startsWith("Outside") &&
+          !tickData.message?.startsWith("Outside") &&
+          !tickData.message?.startsWith("Sniper:")
+        ) {
+          setLastTickAction(tickData.action);
+          toast.info(tickData.action);
+        }
       }
       const { data: statusData, error } = await supabase.functions.invoke("martingale-bot", {
         body: { action: "status" },

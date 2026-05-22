@@ -212,7 +212,8 @@ export function BotConfigurationPanel({
             </ConfigField>
 
             <div className="sm:col-span-2 lg:col-span-3 text-[11px] text-muted-foreground border-t border-border/60 pt-2">
-              Sniper: auto-starts <strong className="text-foreground">9:35–11:00 IST</strong> via Supabase pg_cron (when strategy is sniper) or this page polling every 15s ·
+              <strong className="text-foreground">Sniper</strong> = 9:35–11:00 only (no 2:30 PM) ·{" "}
+              <strong className="text-foreground">Martingale</strong> = 9:25–11:15 + 2:30–3:25 · only the selected strategy runs ·
               exits on TP/SL · one session/day · max R2 · no up+CE · stops at 11:00.
             </div>
           </>

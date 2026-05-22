@@ -16,7 +16,7 @@ DECLARE
   api_key text;
   req_id bigint;
 BEGIN
-  SELECT value INTO strat FROM public.bot_settings WHERE key = 'strategy_mode' LIMIT 1;
+  SELECT lower(trim(value)) INTO strat FROM public.bot_settings WHERE key = 'strategy_mode' LIMIT 1;
   IF strat IS DISTINCT FROM 'sniper' THEN
     RETURN;
   END IF;

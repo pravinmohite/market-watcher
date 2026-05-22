@@ -83,7 +83,7 @@ async function getSniperDailyLossLimit(supabase: any): Promise<number> {
 
 async function getBotConfigForStatus(supabase: any): Promise<Record<string, unknown>> {
   const map = await loadBotSettingsMap(supabase);
-  const strategyMode = map.strategy_mode === STRATEGY_SNIPER ? STRATEGY_SNIPER : STRATEGY_MARTINGALE;
+  const strategyMode = normalizeStrategyMode(map.strategy_mode);
   return {
     strategy_mode: strategyMode,
     trading_mode: map.trading_mode === 'actual' ? 'actual' : 'paper',
@@ -113,17 +113,39 @@ async function countSessionsTodayIst(supabase: any): Promise<number> {
   return count ?? 0;
 }
 
+function normalizeStrategyMode(raw: string | null | undefined): string {
+  const v = String(raw ?? '').trim().toLowerCase();
+  return v === STRATEGY_SNIPER ? STRATEGY_SNIPER : STRATEGY_MARTINGALE;
+}
+
 async function getStrategyMode(supabase: any): Promise<string> {
   const { data } = await supabase.from('bot_settings').select('value').eq('key', 'strategy_mode').maybeSingle();
-  return data?.value === STRATEGY_SNIPER ? STRATEGY_SNIPER : STRATEGY_MARTINGALE;
+  return normalizeStrategyMode(data?.value);
 }
 
 function isSniperStrategy(mode: string): boolean {
-  return mode === STRATEGY_SNIPER;
+  return normalizeStrategyMode(mode) === STRATEGY_SNIPER;
 }
 
 function sniperInTradingWindow(timeMin: number): boolean {
   return timeMin >= SNIPER_WINDOW_START_MIN && timeMin < SNIPER_WINDOW_END_MIN;
+}
+
+/** Martingale only: 9:25–11:15 and 14:30–15:25 IST (afternoon disabled on Tuesday expiry). */
+function martingaleInTradingWindow(timeMin: number, dayOfWeek: number): boolean {
+  const isExpiryDay = dayOfWeek === 2;
+  const inW1 = timeMin >= 9 * 60 + 25 && timeMin <= 11 * 60 + 15;
+  const inW2 = !isExpiryDay && timeMin >= 14 * 60 + 30 && timeMin <= 15 * 60 + 25;
+  return inW1 || inW2;
+}
+
+function nextWindowHint(strategy: string, timeMin: number): string {
+  if (isSniperStrategy(strategy)) {
+    return timeMin < SNIPER_WINDOW_START_MIN ? '9:35 AM today' : 'tomorrow 9:35 AM';
+  }
+  if (timeMin < 9 * 60 + 25) return '9:25 AM today';
+  if (timeMin < 14 * 60 + 30) return '2:30 PM today';
+  return 'tomorrow 9:25 AM';
 }
 
 function istTodayUtcStart(): Date {
@@ -2201,6 +2223,13 @@ async function continueSessionFromLastLoss(
   const modeLabel = isActual ? '🔴' : '📝';
   const strategyMode = await getStrategyMode(supabase);
   const sniper = isSniperStrategy(strategyMode);
+  if (sniper) {
+    const nowIST = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+    const tMin = nowIST.getHours() * 60 + nowIST.getMinutes();
+    if (!sniperInTradingWindow(tMin)) {
+      return { success: true, message: 'Sniper: no martingale recovery outside 9:35–11:00 IST.' };
+    }
+  }
   const lastLossRound = Number(lastLossTrade?.round) || Number(session.current_round) || 1;
   const maxRounds = sniper ? SNIPER_MAX_ROUNDS : (Number(session.max_rounds) || DEFAULT_MAX_ROUNDS);
 
@@ -3068,6 +3097,7 @@ serve(async (req) => {
         const sniperStartMsg = await trySniperAutoStartIfNeeded(supabase, supabaseUrl, anonKey);
         if (sniperStartMsg) tickResults.push(sniperStartMsg);
       } else if (
+        !schedSniper &&
         isMarketDay &&
         !isDailyLossHit &&
         ((schedTime >= MARTINGALE_AUTO_START_1 && schedTime < MARTINGALE_AUTO_START_1 + 1) ||
@@ -3198,30 +3228,27 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
       return { action: `⛔ Market closed today (${tickYMD}, day=${tickDay}). Skipping tick.` };
     }
 
-    const sniperAutoMsg = await trySniperAutoStartIfNeeded(supabase, supabaseUrl, anonKey);
-    if (sniperAutoMsg?.startsWith('Sniper auto-started:')) {
-      return { success: true, action: sniperAutoMsg };
-    }
-
     const tickHour = nowIST_tick.getHours();
     const tickMinute = nowIST_tick.getMinutes();
     const tickTime = tickHour * 60 + tickMinute;
-
-    // Strict trading windows: 9:25-11:15 and 14:30-15:25
-    const WINDOW_1_START = 9 * 60 + 25;
-    const WINDOW_1_END = 11 * 60 + 15;
-    const WINDOW_2_START = 14 * 60 + 30;
-    const WINDOW_2_END = 15 * 60 + 25;
-    const isExpiryDayTick = tickDay === 2;
     const tickStrategyMode = await getStrategyMode(supabase);
     const tickSniper = isSniperStrategy(tickStrategyMode);
-    const inWindow1 = tickTime >= WINDOW_1_START && tickTime <= WINDOW_1_END;
-    // On expiry day (Tuesday) the afternoon window 2:30–3:25 PM is disabled
-    const inWindow2 = !tickSniper && !isExpiryDayTick && tickTime >= WINDOW_2_START && tickTime <= WINDOW_2_END;
-    const inSniperWindow = tickSniper && sniperInTradingWindow(tickTime);
-    const inTradingWindow = tickSniper ? inSniperWindow : (inWindow1 || inWindow2);
+
+    if (tickSniper) {
+      const sniperAutoMsg = await trySniperAutoStartIfNeeded(supabase, supabaseUrl, anonKey);
+      if (sniperAutoMsg?.startsWith('Sniper auto-started:')) {
+        return { success: true, action: sniperAutoMsg };
+      }
+    }
+
+    const inTradingWindow = tickSniper
+      ? sniperInTradingWindow(tickTime)
+      : martingaleInTradingWindow(tickTime, tickDay);
 
     if (!inTradingWindow) {
+      if (tickSniper) {
+        await stopSniperBotForDay(supabase);
+      }
       // If there are active sessions outside windows, square them ALL off
       const { data: activeOutsideList } = await supabase
         .from('martingale_sessions')
@@ -3266,7 +3293,7 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
             }).eq('id', activeOutside.id);
 
             const modeLabel = activeOutside.trading_mode === 'actual' ? '🔴' : '📝';
-            const windowLabel = tickTime > WINDOW_1_END && tickTime < WINDOW_2_START ? '11:15 AM' : '3:25 PM';
+            const windowLabel = tickSniper ? '11:00 AM' : (tickTime > 11 * 60 + 15 && tickTime < 14 * 60 + 30 ? '11:15 AM' : '3:25 PM');
             await sendTelegram(`${modeLabel} ⏰ *Window Closed (${windowLabel})*\nSquared off ${openTradeOutside.option_type} ${openTradeOutside.strike_price} @ ₹${exitPrice} (P&L: ₹${sqPnl.toFixed(0)})`);
           } else {
             await supabase.from('martingale_sessions').update({
@@ -3276,7 +3303,11 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
         }
       }
 
-      return { success: true, message: `Outside trading windows (${tickHour}:${String(tickMinute).padStart(2, '0')} IST). Next: ${tickTime < WINDOW_1_START ? '9:25 AM' : tickTime < WINDOW_2_START ? '2:30 PM' : 'tomorrow 9:25 AM'}.` };
+      const stratLabel = tickSniper ? 'Sniper' : 'Martingale';
+      return {
+        success: true,
+        message: `${stratLabel}: outside trading window (${tickHour}:${String(tickMinute).padStart(2, '0')} IST). Next: ${nextWindowHint(tickStrategyMode, tickTime)}.`,
+      };
     }
 
     // Check for paused session — auto-resume after 10 minutes
@@ -3318,10 +3349,20 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
         }
       }
 
+      const pauseStrat = await getStrategyMode(supabase);
+      const pauseSniper = isSniperStrategy(pauseStrat);
+      if (pauseSniper && !sniperInTradingWindow(tickTime)) {
+        return { success: true, message: 'Sniper: cannot resume — outside 9:35–11:00 window.' };
+      }
       const startRes = await fetch(`${supabaseUrl}/functions/v1/martingale-bot`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${anonKey}` },
-        body: JSON.stringify({ action: 'start', trading_mode: savedMode, max_rounds: savedMaxRounds }),
+        body: JSON.stringify({
+          action: 'start',
+          trading_mode: savedMode,
+          max_rounds: pauseSniper ? SNIPER_MAX_ROUNDS : savedMaxRounds,
+          strategy_mode: pauseStrat,
+        }),
       });
       const startData = await startRes.json();
       await sendTelegram(`▶️ *Bot Resumed after 10-min pause*\n${startData.message || 'Restarted'}`);
@@ -3363,11 +3404,15 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
 
       // Only auto-restart if a sideways pause key existed and just expired (was cleared by isInSidewaysPause)
       if (hadSidewaysPause && !sidewaysPause.paused) {
-        const inMorningWindow = tickTime >= (9 * 60 + 25) && tickTime <= (11 * 60 + 15);
-        const inAfternoonWindow = !isExpiryDayTick && tickTime >= (14 * 60 + 30) && tickTime <= (15 * 60 + 25);
+        const resumeStrat = await getStrategyMode(supabase);
+        const resumeSniper = isSniperStrategy(resumeStrat);
+        const inMorningWindow = resumeSniper
+          ? sniperInTradingWindow(tickTime)
+          : tickTime >= (9 * 60 + 25) && tickTime <= (11 * 60 + 15);
+        const inAfternoonWindow = !resumeSniper && tickDay !== 2 && tickTime >= (14 * 60 + 30) && tickTime <= (15 * 60 + 25);
         if (inMorningWindow || inAfternoonWindow) {
           const dailyPnl = await getDailyPnl(supabase);
-          const dailyLimit = await getDailyLossLimit(supabase);
+          const dailyLimit = resumeSniper ? await getSniperDailyLossLimit(supabase) : await getDailyLossLimit(supabase);
           if (dailyPnl <= -dailyLimit) {
             return { success: true, message: `Daily loss limit breached (₹${dailyPnl.toFixed(0)}). Not auto-restarting after sideways pause.` };
           }
@@ -3493,10 +3538,16 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
             }
           }
 
+          if (resumeSniper) savedMaxRounds = SNIPER_MAX_ROUNDS;
           const startRes = await fetch(`${supabaseUrl}/functions/v1/martingale-bot`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${anonKey}` },
-            body: JSON.stringify({ action: 'start', trading_mode: savedMode, max_rounds: savedMaxRounds }),
+            body: JSON.stringify({
+              action: 'start',
+              trading_mode: savedMode,
+              max_rounds: savedMaxRounds,
+              strategy_mode: resumeStrat,
+            }),
           });
           const startData = await startRes.json();
           await sendTelegram(`▶️ *Bot Resumed after sideways pause*\nMarket movement confirmed — restarting as fresh R1`);
@@ -3827,9 +3878,7 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
       const nowCheck = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
       const checkTime = nowCheck.getHours() * 60 + nowCheck.getMinutes();
       const isExpiryDayCheck = nowCheck.getDay() === 2;
-      const inW1 = checkTime >= (9 * 60 + 25) && checkTime < (11 * 60 + 15);
-      const inW2 = !isExpiryDayCheck && checkTime >= (14 * 60 + 30) && checkTime < (15 * 60 + 25);
-      if (!inW1 && !inW2) {
+      if (!martingaleInTradingWindow(checkTime, nowCheck.getDay())) {
         console.log(`New session skipped: outside trading windows (${nowCheck.getHours()}:${String(nowCheck.getMinutes()).padStart(2, '0')} IST)`);
         return;
       }

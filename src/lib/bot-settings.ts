@@ -38,7 +38,12 @@ export function parseBotSettings(rows: { key: string; value: string }[] | null |
   };
   return {
     trading_mode: map.trading_mode === "actual" ? "actual" : "paper",
-    strategy_mode: map.strategy_mode === "martingale" ? "martingale" : "sniper",
+    strategy_mode:
+      String(map.strategy_mode ?? "")
+        .trim()
+        .toLowerCase() === "martingale"
+        ? "martingale"
+        : "sniper",
     max_rounds: Math.min(10, Math.max(1, Math.round(num(BOT_SETTING_KEYS.max_rounds, DEFAULT_MAX_ROUNDS)))),
     profit_target_pct: num(BOT_SETTING_KEYS.profit_target_pct, DEFAULT_PROFIT_TARGET_PCT),
     stop_loss_pct: num(BOT_SETTING_KEYS.stop_loss_pct, DEFAULT_STOP_LOSS_PCT),
@@ -71,4 +76,28 @@ export const SNIPER_WINDOW_END_MIN = 11 * 60 + 0;
 export function sniperInWindowNow(): boolean {
   const m = istMinutesNow();
   return m >= SNIPER_WINDOW_START_MIN && m < SNIPER_WINDOW_END_MIN;
+}
+
+export const MARTINGALE_WINDOW_1_START = 9 * 60 + 25;
+export const MARTINGALE_WINDOW_1_END = 11 * 60 + 15;
+export const MARTINGALE_WINDOW_2_START = 14 * 60 + 30;
+export const MARTINGALE_WINDOW_2_END = 15 * 60 + 25;
+
+/** Martingale: 9:25–11:15 and 14:30–15:25 IST (no afternoon on Tuesday expiry). */
+export function martingaleInWindowNow(): boolean {
+  const ist = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
+  const m = ist.getHours() * 60 + ist.getMinutes();
+  const isExpiryTuesday = ist.getDay() === 2;
+  const w1 = m >= MARTINGALE_WINDOW_1_START && m <= MARTINGALE_WINDOW_1_END;
+  const w2 = !isExpiryTuesday && m >= MARTINGALE_WINDOW_2_START && m <= MARTINGALE_WINDOW_2_END;
+  return w1 || w2;
+}
+
+/** UI tick: sniper only polls 9:35–11:00 (or while a session is open); martingale uses its windows. */
+export function shouldInvokeMartingaleTick(
+  strategyMode: "martingale" | "sniper",
+  opts?: { botRunning?: boolean; hasActiveSession?: boolean },
+): boolean {
+  if (opts?.hasActiveSession || opts?.botRunning) return true;
+  return strategyMode === "sniper" ? sniperInWindowNow() : martingaleInWindowNow();
 }
