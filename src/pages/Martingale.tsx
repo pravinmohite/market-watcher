@@ -311,8 +311,8 @@ const Martingale = () => {
       },
       {
         id: "session",
-        label: "No session used yet today (max 1/day)",
-        detail: `${sessionsToday} session(s) today`,
+        label: "No sniper session used yet today (max 1/day)",
+        detail: `${sessionsToday} sniper session(s) today (martingale runs do not count)`,
         status: sessionSlotOk ? "pass" : "fail",
       },
       {
@@ -569,7 +569,20 @@ const Martingale = () => {
             }
             void persistSetting(BOT_SETTING_KEYS.trading_mode, mode, { trading_mode: mode });
           }}
-          onStrategyChange={(mode) => void persistSetting(BOT_SETTING_KEYS.strategy_mode, mode, { strategy_mode: mode })}
+          onStrategyChange={(mode) => {
+            void (async () => {
+              await persistSetting(BOT_SETTING_KEYS.strategy_mode, mode, { strategy_mode: mode });
+              if (mode === "sniper" && (isActive || isPaused || data?.bot_running)) {
+                try {
+                  await supabase.functions.invoke("martingale-bot", { body: { action: "stop" } });
+                  toast.info("Stopped martingale session — sniper daily only runs 9:35–11:00 IST.");
+                  queryClient.invalidateQueries({ queryKey: ["martingale-status"] });
+                } catch {
+                  toast.error("Could not stop active session");
+                }
+              }
+            })();
+          }}
           onMaxRoundsChange={(n) => void persistSetting(BOT_SETTING_KEYS.max_rounds, String(n), { max_rounds: n })}
           onProfitTargetChange={(pct) =>
             void persistSetting(BOT_SETTING_KEYS.profit_target_pct, String(pct), { profit_target_pct: pct })
