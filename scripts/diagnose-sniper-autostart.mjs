@@ -53,9 +53,15 @@ function istDayBoundsUtc(ymd) {
 }
 
 const env = loadEnv();
-const url = (env.VITE_SUPABASE_URL || '').replace(/\/$/, '');
-const key = env.VITE_SUPABASE_PUBLISHABLE_KEY || env.VITE_SUPABASE_ANON_KEY;
-const targetYmd = process.argv[2] || yesterdayYmdIst();
+const url = (env.VITE_SUPABASE_URL || env.SUPABASE_URL || '').replace(/\/$/, '');
+const key =
+  env.VITE_SUPABASE_PUBLISHABLE_KEY ||
+  env.VITE_SUPABASE_ANON_KEY ||
+  env.SUPABASE_PUBLISHABLE_KEY ||
+  env.SUPABASE_ANON_KEY;
+const applyCronFix = process.argv.includes('--apply-cron-fix');
+const dateArg = process.argv.find((a) => /^\d{4}-\d{2}-\d{2}$/.test(a));
+const targetYmd = dateArg || yesterdayYmdIst();
 
 if (!url || !key || url.includes('not-configured')) {
   console.error('Set VITE_SUPABASE_URL and VITE_SUPABASE_PUBLISHABLE_KEY in .env');
@@ -100,6 +106,32 @@ async function invokeMartingale(body) {
 
 console.log(`\n=== Sniper auto-start diagnosis for ${targetYmd} (IST) ===\n`);
 
+if (applyCronFix) {
+  console.log('Applying cron bot_settings via API...\n');
+  for (const [k, v] of [
+    ['martingale_cron_publishable_key', key],
+    ['martingale_project_url', url],
+    ['strategy_mode', 'sniper'],
+  ]) {
+    const r = await fetch(`${url}/rest/v1/bot_settings?on_conflict=key`, {
+      method: 'POST',
+      headers: {
+        apikey: key,
+        Authorization: `Bearer ${key}`,
+        'Content-Type': 'application/json',
+        Prefer: 'resolution=merge-duplicates',
+      },
+      body: JSON.stringify({ key: k, value: v, updated_at: new Date().toISOString() }),
+    });
+    if (!r.ok) {
+      console.error(`Failed ${k}:`, await r.text());
+      process.exit(1);
+    }
+    console.log(`  ✓ ${k}`);
+  }
+  console.log('');
+}
+
 const settings = await rest('bot_settings?select=key,value,updated_at');
 const settingsMap = Object.fromEntries(settings.map((s) => [s.key, s.value]));
 console.log('Current bot_settings:');
@@ -108,8 +140,17 @@ for (const k of [
   'bot_running',
   'trading_mode',
   'sideways_pause_until',
+  'martingale_project_url',
+  'martingale_cron_publishable_key',
 ]) {
-  console.log(`  ${k}: ${settingsMap[k] ?? '(not set)'}`);
+  if (k === 'martingale_cron_publishable_key') {
+    const v = settingsMap[k];
+    console.log(`  ${k}: ${v ? `set (${v.length} chars)` : 'MISSING — cron will not fire'}`);
+  } else if (k === 'martingale_project_url') {
+    console.log(`  ${k}: ${settingsMap[k] ? 'set' : '(not set — Vault may have URL)'}`);
+  } else {
+    console.log(`  ${k}: ${settingsMap[k] ?? '(not set)'}`);
+  }
 }
 
 let sessions = [];
@@ -133,30 +174,35 @@ for (const s of sessions) {
   );
 }
 
-const trades = await rest(
-  `martingale_trades?select=id,session_id,round,entry_time,entry_reason_tag,status,pnl&entry_time=gte.${start}&entry_time=lt.${end}&order=entry_time.asc`,
-);
-console.log(`\nTrades on ${targetYmd}: ${trades.length}`);
-const sniperTags = trades.filter((t) => String(t.entry_reason_tag || '').startsWith('sniper_'));
-const martTags = trades.filter((t) =>
-  /martingale_flip|fresh_r1_after_take_profit|session_start_carry/.test(t.entry_reason_tag || ''),
-);
-console.log(`  Sniper-tagged trades: ${sniperTags.length}`);
-console.log(`  Martingale-tagged trades: ${martTags.length}`);
-
-const window935 = trades.filter((t) => {
-  const ist = new Date(new Date(t.entry_time).toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
-  const mins = ist.getHours() * 60 + ist.getMinutes();
-  return mins >= 9 * 60 + 35 && mins < 11 * 60;
-});
-console.log(`  Trades entered 9:35–11:00 IST: ${window935.length}`);
-if (window935.length) {
-  for (const t of window935.slice(0, 8)) {
-    const ist = new Date(new Date(t.entry_time).toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
-    console.log(
-      `    ${String(ist.getHours()).padStart(2, '0')}:${String(ist.getMinutes()).padStart(2, '0')} R${t.round} ${t.entry_reason_tag}`,
+let trades = [];
+let sniperTags = [];
+let martTags = [];
+let window935 = [];
+try {
+  trades = await rest(
+    `martingale_trades?select=id,session_id,round,entry_time,entry_reason_tag,status,pnl&entry_time=gte.${start}&entry_time=lt.${end}&order=entry_time.asc`,
+  );
+} catch (e) {
+  if (String(e.message).includes('entry_reason_tag')) {
+    trades = await rest(
+      `martingale_trades?select=id,session_id,round,entry_time,status,pnl&entry_time=gte.${start}&entry_time=lt.${end}&order=entry_time.asc`,
     );
-  }
+  } else throw e;
+}
+console.log(`\nTrades on ${targetYmd}: ${trades.length}`);
+if (trades[0]?.entry_reason_tag !== undefined) {
+  sniperTags = trades.filter((t) => String(t.entry_reason_tag || '').startsWith('sniper_'));
+  martTags = trades.filter((t) =>
+    /martingale_flip|fresh_r1_after_take_profit|session_start_carry/.test(t.entry_reason_tag || ''),
+  );
+  console.log(`  Sniper-tagged trades: ${sniperTags.length}`);
+  console.log(`  Martingale-tagged trades: ${martTags.length}`);
+  window935 = trades.filter((t) => {
+    const ist = new Date(new Date(t.entry_time).toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+    const mins = ist.getHours() * 60 + ist.getMinutes();
+    return mins >= 9 * 60 + 35 && mins < 11 * 60;
+  });
+  console.log(`  Trades entered 9:35–11:00 IST: ${window935.length}`);
 }
 
 const status = await invokeMartingale({ action: 'status' });
@@ -191,6 +237,28 @@ if (martTags.length > 0 && settingsMap.strategy_mode === 'sniper') {
 
 if (reasons.length === 0) reasons.push('Review Supabase Edge Function logs for martingale-bot around 04:05 UTC.');
 for (const r of reasons) console.log(`  • ${r}`);
+
+console.log('\n=== Monday 9:35 AM auto-start verdict ===\n');
+const mondayReady = [];
+if (settingsMap.strategy_mode === 'sniper') mondayReady.push('OK: strategy_mode is sniper');
+else mondayReady.push(`BLOCK: strategy_mode is "${settingsMap.strategy_mode ?? 'missing'}"`);
+const cronKey = settingsMap.martingale_cron_publishable_key || '';
+if (cronKey.length >= 20) mondayReady.push('OK: cron API key in bot_settings');
+else mondayReady.push('BLOCK: martingale_cron_publishable_key not set — pg_cron cannot call edge function');
+if (settingsMap.trading_mode === 'paper') mondayReady.push('OK: paper mode (no Upstox needed)');
+else if (settingsMap.trading_mode === 'actual') mondayReady.push('CHECK: actual mode — Upstox must be connected before 9:35');
+mondayReady.push('MANUAL: confirm cron job active in SQL Editor (see below)');
+for (const line of mondayReady) console.log(`  ${line}`);
+
+const willRun =
+  settingsMap.strategy_mode === 'sniper' &&
+  cronKey.length >= 20 &&
+  (settingsMap.trading_mode === 'paper' || settingsMap.trading_mode === 'actual');
+console.log(
+  willRun
+    ? '\n→ Likely YES at 9:35 Monday IF pg_cron job is active and edge function is deployed.'
+    : '\n→ NO — fix BLOCK items above before Monday.',
+);
 
 console.log('\nSupabase checks (SQL Editor):');
 console.log('  SELECT jobname, schedule, active FROM cron.job WHERE jobname = \'martingale-sniper-morning-tick\';');

@@ -37,8 +37,12 @@ function loadEnv() {
 }
 
 const env = loadEnv();
-const key = env.VITE_SUPABASE_PUBLISHABLE_KEY || env.VITE_SUPABASE_ANON_KEY;
-const url = (env.VITE_SUPABASE_URL || 'https://wrgwbzbmqphnjwalodsd.supabase.co').replace(/\/$/, '');
+const key =
+  env.VITE_SUPABASE_PUBLISHABLE_KEY ||
+  env.VITE_SUPABASE_ANON_KEY ||
+  env.SUPABASE_PUBLISHABLE_KEY ||
+  env.SUPABASE_ANON_KEY;
+const url = (env.VITE_SUPABASE_URL || env.SUPABASE_URL || 'https://wrgwbzbmqphnjwalodsd.supabase.co').replace(/\/$/, '');
 
 if (!key || key.includes('not-configured') || key.includes('your-')) {
   console.error('Set VITE_SUPABASE_PUBLISHABLE_KEY in .env first.');
@@ -48,6 +52,7 @@ if (!key || key.includes('not-configured') || key.includes('your-')) {
 const escapedKey = key.replace(/'/g, "''");
 const escapedUrl = url.replace(/'/g, "''");
 
+console.log('Tip: node scripts/diagnose-sniper-autostart.mjs --apply-cron-fix\n');
 console.log(`
 -- ========== Sniper cron setup (run entire block in Supabase SQL Editor) ==========
 -- Project: ${url}
