@@ -130,6 +130,7 @@ export type Database = {
           last_tick_at: string | null
           max_rounds: number
           status: string
+          strategy_mode: string
           total_pnl: number
           trading_mode: string
         }
@@ -143,6 +144,7 @@ export type Database = {
           last_tick_at?: string | null
           max_rounds?: number
           status?: string
+          strategy_mode?: string
           total_pnl?: number
           trading_mode?: string
         }
@@ -156,6 +158,7 @@ export type Database = {
           last_tick_at?: string | null
           max_rounds?: number
           status?: string
+          strategy_mode?: string
           total_pnl?: number
           trading_mode?: string
         }
@@ -357,7 +360,7 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
-      [_ in never]: never
+      invoke_martingale_sniper_cron_tick: { Args: never; Returns: undefined }
     }
     Enums: {
       [_ in never]: never
