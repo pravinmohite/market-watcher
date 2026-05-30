@@ -463,18 +463,23 @@ serve(async (req) => {
       // Try Upstox API first if we have a valid token
       const { data: upstoxToken } = await supabase
         .from('upstox_tokens')
-        .select('access_token')
+        .select('access_token, extended_token')
         .gt('expires_at', new Date().toISOString())
         .order('created_at', { ascending: false })
         .limit(1)
         .maybeSingle();
 
-      if (upstoxToken?.access_token) {
+      const upstoxBearer =
+        upstoxToken?.access_token ||
+        (upstoxToken as { extended_token?: string } | null)?.extended_token ||
+        null;
+
+      if (upstoxBearer) {
         try {
           console.log('Using Upstox API for option chain data');
           const upstoxHeaders = {
             'Accept': 'application/json',
-            'Authorization': `Bearer ${upstoxToken.access_token}`,
+            'Authorization': `Bearer ${upstoxBearer}`,
           };
 
           // Get Nifty spot price from Upstox market quotes

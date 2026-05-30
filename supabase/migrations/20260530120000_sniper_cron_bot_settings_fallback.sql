@@ -1,8 +1,5 @@
--- Unattended sniper bot: pg_cron invokes martingale-bot cron-tick every minute during
--- 9:30–11:29 IST (UTC hours 4–5, Mon–Fri). Edge function gates actual start to 9:35–11:00.
--- Only runs when bot_settings.strategy_mode = 'sniper'.
---
--- One-time after migrate: add Vault secret for your publishable/anon key (see scripts/setup-sniper-cron-vault.mjs)
+-- Reliable sniper cron: Vault key OR bot_settings fallback (see scripts/setup-sniper-cron-vault.mjs).
+-- Runs every minute Mon–Fri UTC 4:00–5:59 (~9:30–11:29 IST); edge function starts sniper at 9:35–11:00.
 
 CREATE OR REPLACE FUNCTION public.invoke_martingale_sniper_cron_tick()
 RETURNS void
@@ -26,21 +23,21 @@ BEGIN
   WHERE name = 'martingale_project_url'
   LIMIT 1;
 
+  IF base_url IS NULL THEN
+    SELECT value INTO base_url FROM public.bot_settings WHERE key = 'martingale_project_url' LIMIT 1;
+  END IF;
+
   SELECT decrypted_secret INTO api_key
   FROM vault.decrypted_secrets
   WHERE name = 'martingale_publishable_key'
   LIMIT 1;
-
-  IF base_url IS NULL THEN
-    SELECT value INTO base_url FROM public.bot_settings WHERE key = 'martingale_project_url' LIMIT 1;
-  END IF;
 
   IF api_key IS NULL THEN
     SELECT value INTO api_key FROM public.bot_settings WHERE key = 'martingale_cron_publishable_key' LIMIT 1;
   END IF;
 
   IF base_url IS NULL OR api_key IS NULL OR length(trim(api_key)) < 20 THEN
-    RAISE WARNING 'martingale sniper cron: missing API key — run scripts/setup-sniper-cron-vault.mjs';
+    RAISE WARNING 'sniper cron: set Vault secrets OR bot_settings martingale_cron_publishable_key (run scripts/setup-sniper-cron-vault.mjs)';
     RETURN;
   END IF;
 
@@ -56,10 +53,6 @@ BEGIN
 END;
 $$;
 
-COMMENT ON FUNCTION public.invoke_martingale_sniper_cron_tick() IS
-  'POST martingale-bot cron-tick when strategy_mode=sniper (requires Vault URL + publishable key).';
-
--- Idempotent reschedule
 DO $$
 BEGIN
   IF EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'martingale-sniper-morning-tick') THEN
@@ -73,14 +66,13 @@ SELECT cron.schedule(
   $$SELECT public.invoke_martingale_sniper_cron_tick();$$
 );
 
--- Default project URL in Vault (public). Publishable key: run scripts/setup-sniper-cron-vault.mjs once.
-DO $$
-BEGIN
-  IF NOT EXISTS (SELECT 1 FROM vault.secrets WHERE name = 'martingale_project_url') THEN
-    PERFORM vault.create_secret(
-      'https://wrgwbzbmqphnjwalodsd.supabase.co',
-      'martingale_project_url',
-      'Supabase project URL for martingale-bot cron'
-    );
-  END IF;
-END $$;
+-- Public project URL fallback (same as prior migration)
+INSERT INTO public.bot_settings (key, value, updated_at)
+VALUES (
+  'martingale_project_url',
+  'https://wrgwbzbmqphnjwalodsd.supabase.co',
+  now()
+)
+ON CONFLICT (key) DO UPDATE SET
+  value = EXCLUDED.value,
+  updated_at = now();

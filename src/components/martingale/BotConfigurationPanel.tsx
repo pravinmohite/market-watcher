@@ -73,20 +73,27 @@ export function BotConfigurationPanel({
         </ConfigField>
 
         <ConfigField label="Trading mode">
-          <div className="flex items-center gap-2 h-8">
-            <span className={cn("text-xs", settings.trading_mode === "paper" ? "text-foreground font-medium" : "text-muted-foreground")}>
-              Paper
-            </span>
-            <Switch
-              checked={settings.trading_mode === "actual"}
-              disabled={disabled}
-              onCheckedChange={(checked) => onTradingModeChange(checked ? "actual" : "paper")}
-            />
-            <span className={cn("text-xs", settings.trading_mode === "actual" ? "text-loss font-medium" : "text-muted-foreground")}>
-              Actual
-            </span>
-            {settings.trading_mode === "actual" && !isUpstoxConnected && (
-              <span className="text-[10px] text-warning">Connect Upstox</span>
+          <div className="space-y-1">
+            <div className="flex items-center gap-2 h-8">
+              <span className={cn("text-xs", settings.trading_mode === "paper" ? "text-foreground font-medium" : "text-muted-foreground")}>
+                Paper
+              </span>
+              <Switch
+                checked={settings.trading_mode === "actual"}
+                disabled={disabled}
+                onCheckedChange={(checked) => onTradingModeChange(checked ? "actual" : "paper")}
+              />
+              <span className={cn("text-xs", settings.trading_mode === "actual" ? "text-loss font-medium" : "text-muted-foreground")}>
+                Actual
+              </span>
+              {settings.trading_mode === "actual" && !isUpstoxConnected && (
+                <span className="text-[10px] text-warning">Connect Upstox</span>
+              )}
+            </div>
+            {settings.trading_mode === "actual" && (
+              <p className="text-[10px] text-muted-foreground leading-snug">
+                Upstox live token lasts until 3:30 AM IST each day (broker rule). One login per trading morning — not weekly.
+              </p>
             )}
           </div>
         </ConfigField>
@@ -212,8 +219,8 @@ export function BotConfigurationPanel({
             </ConfigField>
 
             <div className="sm:col-span-2 lg:col-span-3 text-[11px] text-muted-foreground border-t border-border/60 pt-2">
-              <strong className="text-foreground">Sniper</strong> = 9:35–11:00 only (no 2:30 PM) ·{" "}
-              <strong className="text-foreground">Martingale</strong> = 9:25–11:15 + 2:30–3:25 · only the selected strategy runs ·
+              <strong className="text-foreground">Sniper</strong> = 9:35–11:00 IST · auto-starts via Supabase cron (browser can be closed) ·{" "}
+              <strong className="text-foreground">Martingale</strong> = 9:25–11:15 + 2:30–3:25 · only one strategy runs ·
               exits on TP/SL · one session/day · max R2 · no up+CE · stops at 11:00.
             </div>
           </>

@@ -225,6 +225,8 @@ const Martingale = () => {
   const isActive = activeSession?.status === 'active';
   const isPaused = activeSession?.status === 'paused';
   const isUpstoxConnected = upstoxStatus?.connected;
+  const upstoxValidUntil = (upstoxStatus as { valid_until_ist?: string } | undefined)?.valid_until_ist;
+  const upstoxReconnectNote = (upstoxStatus as { reconnect_note?: string } | undefined)?.reconnect_note;
   const dataSource = optionData?.source;
   const dailyPnl = data?.daily_pnl ?? 0;
   const serverBotConfig = data?.bot_config as BotSettingsMap | undefined;
@@ -530,10 +532,14 @@ const Martingale = () => {
               </p>
               <p className="text-[10px] md:text-xs text-muted-foreground">
                 {isUpstoxConnected
-                  ? `Real-time data active`
-                  : "Connect for real-time option prices"
-                }
+                  ? upstoxValidUntil
+                    ? `Live access until ${upstoxValidUntil} IST`
+                    : "Real-time data active"
+                  : "Connect once per trading day for live orders (Upstox expires 3:30 AM IST)"}
               </p>
+              {isUpstoxConnected && upstoxReconnectNote && (
+                <p className="text-[10px] text-muted-foreground mt-0.5 max-w-md">{upstoxReconnectNote}</p>
+              )}
               {dataSource && (
                 <p className="text-[10px] md:text-xs text-muted-foreground mt-0.5">
                   Source: <span className="font-mono font-medium text-foreground">{dataSource}</span>

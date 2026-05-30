@@ -127,6 +127,30 @@ function isSniperStrategy(mode: string): boolean {
   return normalizeStrategyMode(mode) === STRATEGY_SNIPER;
 }
 
+function isMissingDbColumnError(err: unknown, column: string): boolean {
+  const e = err as { code?: string; message?: string };
+  const msg = String(e?.message ?? '');
+  return e?.code === '42703' || e?.code === 'PGRST204' || msg.includes(column);
+}
+
+function entryReasonFromTradeRow(trade: { trade_log?: { entry?: { entry_reason_rule_tag?: string } } } | null): string {
+  return String(trade?.trade_log?.entry?.entry_reason_rule_tag ?? '');
+}
+
+/** Insert session; omit strategy_mode if column not migrated yet. */
+async function insertMartingaleSession(
+  supabase: any,
+  row: Record<string, unknown>,
+): Promise<{ data: Record<string, unknown> | null; error: unknown }> {
+  const full = { ...row };
+  let res = await supabase.from('martingale_sessions').insert(full).select().single();
+  if (res.error && isMissingDbColumnError(res.error, 'strategy_mode')) {
+    const { strategy_mode: _sm, ...without } = full;
+    res = await supabase.from('martingale_sessions').insert(without).select().single();
+  }
+  return res;
+}
+
 /** Entry tags that only martingale strategy may create. */
 function isMartingaleOnlyEntryTag(tag: string): boolean {
   const t = String(tag ?? '');
@@ -175,39 +199,61 @@ function istTodayUtcStart(): Date {
 
 /** True only if a sniper session exists today (martingale sessions do not block sniper). */
 async function sessionIsSniper(supabase: any, sessionId: string): Promise<boolean> {
-  const { data: sess } = await supabase
+  let sess: { strategy_mode?: string; max_rounds?: number } | null = null;
+  const sessRes = await supabase
     .from('martingale_sessions')
     .select('strategy_mode, max_rounds')
     .eq('id', sessionId)
     .maybeSingle();
-  if (sess?.strategy_mode) {
-    return normalizeStrategyMode(sess.strategy_mode) === STRATEGY_SNIPER;
+  if (!sessRes.error) {
+    sess = sessRes.data;
+    if (sess?.strategy_mode && normalizeStrategyMode(sess.strategy_mode) === STRATEGY_SNIPER) {
+      return true;
+    }
+  } else if (!isMissingDbColumnError(sessRes.error, 'strategy_mode')) {
+    console.error('sessionIsSniper session:', sessRes.error);
   }
+
   const { data: r1 } = await supabase
     .from('martingale_trades')
-    .select('entry_reason_tag')
+    .select('trade_log')
     .eq('session_id', sessionId)
     .eq('round', 1)
     .limit(1)
     .maybeSingle();
-  const tag = String(r1?.entry_reason_tag ?? '');
+  const tag = entryReasonFromTradeRow(r1);
   if (tag.startsWith('sniper_')) return true;
-  return Number(sess?.max_rounds) === SNIPER_MAX_ROUNDS && tag.length > 0;
+
+  return false;
 }
 
 async function countSniperSessionsTodayIst(supabase: any): Promise<number> {
   const todayUTC = istTodayUtcStart();
-  const { data: sessions, error } = await supabase
+  let sessions: { id: string; strategy_mode?: string; max_rounds?: number }[] | null = null;
+  const withMode = await supabase
     .from('martingale_sessions')
-    .select('id, strategy_mode')
+    .select('id, strategy_mode, max_rounds')
     .gte('created_at', todayUTC.toISOString());
-  if (error) {
-    console.error('countSniperSessionsTodayIst:', error);
+  if (!withMode.error) {
+    sessions = withMode.data;
+  } else if (isMissingDbColumnError(withMode.error, 'strategy_mode')) {
+    const basic = await supabase
+      .from('martingale_sessions')
+      .select('id, max_rounds')
+      .gte('created_at', todayUTC.toISOString());
+    if (basic.error) {
+      console.error('countSniperSessionsTodayIst:', basic.error);
+      return 0;
+    }
+    sessions = basic.data;
+  } else {
+    console.error('countSniperSessionsTodayIst:', withMode.error);
     return 0;
   }
+
   let n = 0;
   for (const s of sessions || []) {
-    if (normalizeStrategyMode(s.strategy_mode) === STRATEGY_SNIPER) {
+    if (s.strategy_mode && normalizeStrategyMode(s.strategy_mode) === STRATEGY_SNIPER) {
       n++;
       continue;
     }
@@ -286,7 +332,6 @@ async function haltMartingaleSessionsForSniperMode(
   }
 
   if (halted.length > 0) {
-    await stopSniperBotForDay(supabase);
     return `Sniper mode: halted ${halted.length} martingale session(s) — only sniper daily runs.`;
   }
   return null;
@@ -2919,8 +2964,20 @@ serve(async (req) => {
     }
 
     if (action === 'start') {
-      const tradingMode = body.trading_mode || 'paper';
       const skipDecayCheck = body.skip_decay_check === true; // Allow manual override
+
+      const settingsAtStart = await loadBotSettingsMap(supabase);
+      const bodyTrading =
+        body.trading_mode === 'actual' || body.trading_mode === 'paper' ? body.trading_mode : null;
+      const tradingMode =
+        bodyTrading ?? (settingsAtStart.trading_mode === 'actual' ? 'actual' : 'paper');
+
+      if (bodyTrading) {
+        await supabase.from('bot_settings').upsert(
+          { key: 'trading_mode', value: tradingMode, updated_at: new Date().toISOString() },
+          { onConflict: 'key' },
+        );
+      }
 
       const strategyBeforeStart = await getStrategyMode(supabase);
       const requestedStrategy = body.strategy_mode
@@ -3123,16 +3180,13 @@ serve(async (req) => {
           price: entryPrice,
         });
         if (!buyResult.success) {
-          const { data: pausedSession } = await supabase
-            .from('martingale_sessions')
-            .insert({
-              status: 'paused',
-              current_round: 1,
-              max_rounds: maxRounds,
-              trading_mode: tradingMode,
-              strategy_mode: strategyMode,
-            })
-            .select().single();
+          const { data: pausedSession } = await insertMartingaleSession(supabase, {
+            status: 'paused',
+            current_round: 1,
+            max_rounds: maxRounds,
+            trading_mode: tradingMode,
+            strategy_mode: strategyMode,
+          });
           if (pausedSession) {
             await pauseBotWithNotification(supabase, pausedSession.id, 
               `BUY order for ${entryStrike} ${entryOptionType} @ ₹${entryPrice} failed to fill after 3 attempts.`);
@@ -3175,19 +3229,15 @@ serve(async (req) => {
       const anchorPe =
         typeof optionData.otmPEPrice === 'number' && optionData.otmPEPrice > 0 ? optionData.otmPEPrice : null;
 
-      const { data: session, error: sessErr } = await supabase
-        .from('martingale_sessions')
-        .insert({
-          status: 'active',
-          current_round: 1,
-          max_rounds: maxRounds,
-          trading_mode: tradingMode,
-          strategy_mode: strategyMode,
-          anchor_otm_ce_premium: anchorCe,
-          anchor_otm_pe_premium: anchorPe,
-        })
-        .select()
-        .single();
+      const { data: session, error: sessErr } = await insertMartingaleSession(supabase, {
+        status: 'active',
+        current_round: 1,
+        max_rounds: maxRounds,
+        trading_mode: tradingMode,
+        strategy_mode: strategyMode,
+        anchor_otm_ce_premium: anchorCe,
+        anchor_otm_pe_premium: anchorPe,
+      });
       if (sessErr) throw sessErr;
 
       const startTag = sniper

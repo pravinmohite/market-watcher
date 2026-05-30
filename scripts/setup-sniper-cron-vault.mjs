@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 /**
- * One-time: store publishable key in Supabase Vault for pg_cron → martingale-bot.
- * Run from market-watcher/: node scripts/setup-sniper-cron-vault.mjs
+ * One-time: enable pg_cron → martingale-bot for unattended sniper auto-start (9:35–11:00 IST).
  *
- * Requires .env with VITE_SUPABASE_PUBLISHABLE_KEY (and optional VITE_SUPABASE_URL).
- * Paste the printed SQL into Supabase Dashboard → SQL Editor → Run.
+ * 1. Apply migrations: supabase db push (includes 20260521100000 + 20260530120000 + strategy_mode)
+ * 2. Run: node scripts/setup-sniper-cron-vault.mjs
+ * 3. Paste ALL SQL below into Supabase Dashboard → SQL Editor → Run
+ * 4. Deploy edge function: supabase functions deploy martingale-bot
  */
 import { readFileSync, existsSync } from 'fs';
 import { join, dirname } from 'path';
@@ -18,16 +19,19 @@ function loadEnv() {
     console.error('Missing .env — copy .env.example and set VITE_SUPABASE_PUBLISHABLE_KEY');
     process.exit(1);
   }
-  const text = readFileSync(envPath, 'utf8');
+  const raw = readFileSync(envPath, 'utf8').replace(/^\uFEFF/, '');
   const out = {};
-  for (const line of text.split('\n')) {
-    const m = line.match(/^\s*([A-Za-z0-9_]+)\s*=\s*(.*)$/);
-    if (!m) continue;
-    let v = m[2].trim();
+  for (const line of raw.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const eq = trimmed.indexOf('=');
+    if (eq < 1) continue;
+    const k = trimmed.slice(0, eq).trim();
+    let v = trimmed.slice(eq + 1).trim();
     if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
       v = v.slice(1, -1);
     }
-    out[m[1]] = v;
+    out[k] = v;
   }
   return out;
 }
@@ -41,27 +45,45 @@ if (!key || key.includes('not-configured') || key.includes('your-')) {
   process.exit(1);
 }
 
-const escaped = key.replace(/'/g, "''");
+const escapedKey = key.replace(/'/g, "''");
+const escapedUrl = url.replace(/'/g, "''");
 
 console.log(`
--- Run once in Supabase SQL Editor (project: ${url})
+-- ========== Sniper cron setup (run entire block in Supabase SQL Editor) ==========
+-- Project: ${url}
 
+-- A) bot_settings fallback (used if Vault key missing)
+INSERT INTO public.bot_settings (key, value, updated_at)
+VALUES ('martingale_cron_publishable_key', '${escapedKey}', now())
+ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now();
+
+INSERT INTO public.bot_settings (key, value, updated_at)
+VALUES ('martingale_project_url', '${escapedUrl}', now())
+ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now();
+
+-- B) Vault (preferred)
 DO $$
 BEGIN
+  IF NOT EXISTS (SELECT 1 FROM vault.secrets WHERE name = 'martingale_project_url') THEN
+    PERFORM vault.create_secret('${escapedUrl}', 'martingale_project_url', 'Sniper cron project URL');
+  END IF;
   IF NOT EXISTS (SELECT 1 FROM vault.secrets WHERE name = 'martingale_publishable_key') THEN
-    PERFORM vault.create_secret(
-      '${escaped}',
-      'martingale_publishable_key',
-      'Publishable/anon key for martingale-bot cron (verify_jwt=false)'
-    );
-  ELSE
-    RAISE NOTICE 'martingale_publishable_key already exists — update it in Dashboard → Database → Vault if needed';
+    PERFORM vault.create_secret('${escapedKey}', 'martingale_publishable_key', 'Sniper cron API key');
   END IF;
 END $$;
 
--- Verify cron job exists:
+-- C) Ensure strategy is sniper
+INSERT INTO public.bot_settings (key, value, updated_at)
+VALUES ('strategy_mode', 'sniper', now())
+ON CONFLICT (key) DO UPDATE SET value = 'sniper', updated_at = now();
+
+-- D) Verify cron job (re-created by migration 20260530120000)
 SELECT jobid, jobname, schedule, active FROM cron.job WHERE jobname = 'martingale-sniper-morning-tick';
 
--- Optional: test invoke (only when strategy_mode = sniper in bot_settings):
+-- E) Test invoke now (only starts if inside 9:35–11:00 IST + market day)
 SELECT public.invoke_martingale_sniper_cron_tick();
+
+-- F) Check recent sessions
+SELECT id, status, max_rounds, created_at FROM martingale_sessions
+ORDER BY created_at DESC LIMIT 5;
 `);
