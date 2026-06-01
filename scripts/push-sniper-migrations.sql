@@ -1,5 +1,9 @@
 -- Run this ONCE in Supabase Dashboard → SQL Editor (pg_cron + strategy_mode column).
--- bot_settings cron key is already set via: node scripts/diagnose-sniper-autostart.mjs --apply-cron-fix
+-- Git/Lovable commit does NOT run this automatically.
+-- bot_settings cron key: node scripts/diagnose-sniper-autostart.mjs --apply-cron-fix
+
+CREATE EXTENSION IF NOT EXISTS pg_cron WITH SCHEMA pg_catalog;
+CREATE EXTENSION IF NOT EXISTS pg_net WITH SCHEMA extensions;
 
 -- 1) strategy_mode column on sessions
 ALTER TABLE public.martingale_sessions
@@ -76,7 +80,37 @@ SELECT cron.schedule(
   $$SELECT public.invoke_martingale_sniper_cron_tick();$$
 );
 
--- 3) Verify
+-- 3) Health RPC for scripts/diagnose-sniper-autostart.mjs
+CREATE OR REPLACE FUNCTION public.get_sniper_cron_health()
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_catalog, cron
+AS $$
+DECLARE
+  j record;
+  key_len int;
+BEGIN
+  SELECT jobname, schedule, active INTO j
+  FROM cron.job WHERE jobname = 'martingale-sniper-morning-tick' LIMIT 1;
+  SELECT length(trim(coalesce(value, ''))) INTO key_len
+  FROM public.bot_settings WHERE key = 'martingale_cron_publishable_key' LIMIT 1;
+  RETURN jsonb_build_object(
+    'pg_cron_job_exists', j.jobname IS NOT NULL,
+    'jobname', j.jobname,
+    'schedule', j.schedule,
+    'active', COALESCE(j.active, false),
+    'cron_key_chars', COALESCE(key_len, 0),
+    'strategy_mode', (SELECT value FROM public.bot_settings WHERE key = 'strategy_mode' LIMIT 1)
+  );
+EXCEPTION WHEN OTHERS THEN
+  RETURN jsonb_build_object('pg_cron_job_exists', false, 'error', SQLERRM);
+END;
+$$;
+GRANT EXECUTE ON FUNCTION public.get_sniper_cron_health() TO anon, authenticated, service_role;
+
+-- 4) Verify (must return 1 active job)
 SELECT jobname, schedule, active FROM cron.job WHERE jobname = 'martingale-sniper-morning-tick';
 SELECT column_name FROM information_schema.columns
   WHERE table_name = 'martingale_sessions' AND column_name = 'strategy_mode';
+SELECT public.get_sniper_cron_health();

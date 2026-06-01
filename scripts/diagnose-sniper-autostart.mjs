@@ -142,6 +142,7 @@ for (const k of [
   'sideways_pause_until',
   'martingale_project_url',
   'martingale_cron_publishable_key',
+  'last_cron_tick_at',
 ]) {
   if (k === 'martingale_cron_publishable_key') {
     const v = settingsMap[k];
@@ -205,6 +206,22 @@ if (trades[0]?.entry_reason_tag !== undefined) {
   console.log(`  Trades entered 9:35–11:00 IST: ${window935.length}`);
 }
 
+let cronHealth = null;
+try {
+  cronHealth = await rest('rpc/get_sniper_cron_health');
+} catch {
+  cronHealth = null;
+}
+if (cronHealth) {
+  console.log('\npg_cron health (from DB):');
+  console.log(`  job exists: ${cronHealth.pg_cron_job_exists}`);
+  console.log(`  active: ${cronHealth.active}`);
+  console.log(`  schedule: ${cronHealth.schedule ?? 'n/a'}`);
+  if (cronHealth.error) console.log(`  error: ${cronHealth.error}`);
+} else {
+  console.log('\npg_cron health: RPC not installed — run scripts/push-sniper-migrations.sql');
+}
+
 const status = await invokeMartingale({ action: 'status' });
 console.log('\nLive status API:');
 console.log(`  strategy_mode: ${status.strategy_mode}`);
@@ -245,6 +262,20 @@ else mondayReady.push(`BLOCK: strategy_mode is "${settingsMap.strategy_mode ?? '
 const cronKey = settingsMap.martingale_cron_publishable_key || '';
 if (cronKey.length >= 20) mondayReady.push('OK: cron API key in bot_settings');
 else mondayReady.push('BLOCK: martingale_cron_publishable_key not set — pg_cron cannot call edge function');
+
+const lastCron = settingsMap.last_cron_tick_at;
+if (cronHealth?.pg_cron_job_exists === false) {
+  mondayReady.push('BLOCK: pg_cron job martingale-sniper-morning-tick NOT in database — run push-sniper-migrations.sql');
+} else if (cronHealth?.pg_cron_job_exists && !cronHealth?.active) {
+  mondayReady.push('BLOCK: pg_cron job exists but active=false');
+} else if (cronHealth?.pg_cron_job_exists) {
+  mondayReady.push('OK: pg_cron job registered in database');
+}
+if (!lastCron) {
+  mondayReady.push('WARN: last_cron_tick_at never set — pg_cron never reached edge function (deploy martingale-bot after SQL)');
+} else {
+  mondayReady.push(`INFO: last_cron_tick_at = ${lastCron}`);
+}
 if (settingsMap.trading_mode === 'paper') mondayReady.push('OK: paper mode (no Upstox needed)');
 else if (settingsMap.trading_mode === 'actual') mondayReady.push('CHECK: actual mode — Upstox must be connected before 9:35');
 mondayReady.push('MANUAL: confirm cron job active in SQL Editor (see below)');

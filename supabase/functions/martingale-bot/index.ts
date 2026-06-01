@@ -3283,6 +3283,15 @@ serve(async (req) => {
 
     // ========== AUTO-SCHEDULE LOGIC (only on cron-tick) ==========
     if (isCronTick) {
+      await supabase.from('bot_settings').upsert(
+        {
+          key: 'last_cron_tick_at',
+          value: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: 'key' },
+      );
+
       const nowIST_sched = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
       const schedHour = nowIST_sched.getHours();
       const schedMinute = nowIST_sched.getMinutes();
