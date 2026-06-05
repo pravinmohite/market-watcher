@@ -2627,20 +2627,19 @@ async function continueSessionFromLastLoss(
   };
 }
 
-serve(async (req) => {
-  if (req.method === 'OPTIONS') {
-    return new Response(null, { headers: corsHeaders });
-  }
-
+async function processRequest(req: Request, preParsedBody?: any): Promise<Response> {
   try {
     const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
     const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
     const anonKey = Deno.env.get('SUPABASE_ANON_KEY')!;
     const supabase = createClient(supabaseUrl, supabaseKey);
 
-    let body: any = {};
-    try { body = await req.json(); } catch {}
+    let body: any = preParsedBody ?? {};
+    if (!preParsedBody) {
+      try { body = await req.json(); } catch {}
+    }
     const action = body.action || 'tick';
+
 
     if (action === 'status') {
       let activeSession = null;
