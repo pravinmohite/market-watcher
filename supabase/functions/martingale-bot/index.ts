@@ -3462,7 +3462,7 @@ serve(async (req) => {
   let preBody: any = {};
   try { preBody = await req.json(); } catch {}
 
-  if (preBody?.action === 'cron-tick' && preBody?.source === 'pg_cron') {
+  if (preBody?.action === 'cron-tick') {
     const work = processRequest(req, preBody).catch((e) =>
       console.error('background cron-tick error:', e),
     );
