@@ -2627,20 +2627,19 @@ async function continueSessionFromLastLoss(
   };
 }
 
-serve(async (req) => {
-  if (req.method === 'OPTIONS') {
-    return new Response(null, { headers: corsHeaders });
-  }
-
+async function processRequest(req: Request, preParsedBody?: any): Promise<Response> {
   try {
     const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
     const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
     const anonKey = Deno.env.get('SUPABASE_ANON_KEY')!;
     const supabase = createClient(supabaseUrl, supabaseKey);
 
-    let body: any = {};
-    try { body = await req.json(); } catch {}
+    let body: any = preParsedBody ?? {};
+    if (!preParsedBody) {
+      try { body = await req.json(); } catch {}
+    }
     const action = body.action || 'tick';
+
 
     if (action === 'status') {
       let activeSession = null;
@@ -3450,7 +3449,37 @@ serve(async (req) => {
       status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
   }
+}
+
+serve(async (req) => {
+  if (req.method === 'OPTIONS') {
+    return new Response(null, { headers: corsHeaders });
+  }
+
+  // Fast-path for pg_cron cron-tick: respond immediately, run in background.
+  // pg_net has a 5s default timeout that drops the connection; without this
+  // the edge function gets killed mid-work and sniper auto-start never completes.
+  let preBody: any = {};
+  try { preBody = await req.json(); } catch {}
+
+  if (preBody?.action === 'cron-tick') {
+    const work = processRequest(req, preBody).catch((e) =>
+      console.error('background cron-tick error:', e),
+    );
+    // @ts-ignore — EdgeRuntime is provided by Supabase edge runtime
+    if (typeof EdgeRuntime !== 'undefined' && (EdgeRuntime as any).waitUntil) {
+      // @ts-ignore
+      (EdgeRuntime as any).waitUntil(work);
+    }
+    return new Response(
+      JSON.stringify({ success: true, queued: true, source: 'pg_cron' }),
+      { status: 202, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
+    );
+  }
+
+  return await processRequest(req, preBody);
 });
+
 
 // Single tick logic
 async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string, source: string): Promise<any> {
