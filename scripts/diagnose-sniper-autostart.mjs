@@ -143,6 +143,7 @@ for (const k of [
   'martingale_project_url',
   'martingale_cron_publishable_key',
   'last_cron_tick_at',
+  'last_sniper_auto_start_log',
 ]) {
   if (k === 'martingale_cron_publishable_key') {
     const v = settingsMap[k];

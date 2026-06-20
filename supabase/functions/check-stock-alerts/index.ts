@@ -31,6 +31,155 @@ function parseCookies(setCookieHeaders: string[]): string {
   return Object.entries(cookieMap).map(([k, v]) => `${k}=${v}`).join('; ');
 }
 
+/** IST clock for Nifty weekly expiry (Tuesday). */
+function getIstNow(): Date {
+  return new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+}
+
+function getNextWeeklyExpiryISO(): { iso: string; display: string } {
+  const now = getIstNow();
+  const day = now.getDay();
+  let daysUntilTuesday = (2 - day + 7) % 7;
+  if (daysUntilTuesday === 0) {
+    const mins = now.getHours() * 60 + now.getMinutes();
+    if (mins >= 15 * 60 + 30) daysUntilTuesday = 7;
+  }
+  const expiry = new Date(now);
+  expiry.setDate(now.getDate() + daysUntilTuesday);
+  const yyyy = expiry.getFullYear();
+  const mm = String(expiry.getMonth() + 1).padStart(2, '0');
+  const dd = String(expiry.getDate()).padStart(2, '0');
+  const mmm = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][expiry.getMonth()];
+  return { iso: `${yyyy}-${mm}-${dd}`, display: `${dd}-${mmm}-${yyyy}` };
+}
+
+function estimateOtmPremiums(niftySpot: number, atmStrike: number, strikeDiff: number) {
+  const otmCEStrike = atmStrike + strikeDiff;
+  const otmPEStrike = atmStrike - strikeDiff;
+  const distCE = Math.abs(otmCEStrike - niftySpot);
+  const otmCEPrice = parseFloat(Math.max(5, niftySpot * 0.013 - distCE * 0.5).toFixed(2));
+  const distPE = Math.abs(otmPEStrike - niftySpot);
+  const otmPEPrice = parseFloat(Math.max(5, niftySpot * 0.013 - distPE * 0.5).toFixed(2));
+  return { otmCEStrike, otmPEStrike, otmCEPrice, otmPEPrice };
+}
+
+/** Faster NSE session (edge functions often timeout on the 2.5s full warmup). */
+async function getNSESessionQuick(): Promise<{ cookies: string; headers: Record<string, string> } | null> {
+  const baseHeaders = {
+    'User-Agent':
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    Accept: 'application/json',
+    'Accept-Language': 'en-US,en;q=0.9',
+    Referer: 'https://www.nseindia.com/',
+  };
+  try {
+    const sessionRes = await fetch('https://www.nseindia.com/', {
+      headers: { ...baseHeaders, Accept: 'text/html,application/xhtml+xml' },
+      redirect: 'follow',
+    });
+    const allCookies: string[] = [];
+    sessionRes.headers.forEach((value, key) => {
+      if (key.toLowerCase() === 'set-cookie') allCookies.push(value);
+    });
+    await sessionRes.text();
+    await new Promise((r) => setTimeout(r, 400));
+    const cookies = parseCookies(allCookies);
+    return {
+      cookies,
+      headers: {
+        ...baseHeaders,
+        'X-Requested-With': 'XMLHttpRequest',
+        Cookie: cookies,
+      },
+    };
+  } catch (e) {
+    console.error('NSE quick session failed:', e);
+    return null;
+  }
+}
+
+async function fetchNiftySpotFromNSE(): Promise<number | null> {
+  const session = await getNSESessionQuick();
+  if (!session) return null;
+  const niftyRes = await fetch('https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%2050', {
+    headers: session.headers,
+  });
+  if (!niftyRes.ok) {
+    await niftyRes.text();
+    return null;
+  }
+  const niftyData = await niftyRes.json();
+  const niftyEntry = niftyData?.data?.find((d: any) => d.symbol === 'NIFTY 50' || d.index === 'NIFTY 50');
+  const spot = niftyEntry?.lastPrice ?? niftyEntry?.last;
+  return typeof spot === 'number' && spot > 0 ? spot : null;
+}
+
+async function loadCachedOptionChain(supabase: any): Promise<Record<string, unknown> | null> {
+  const { data } = await supabase.from('bot_settings').select('key, value').in('key', [
+    'last_option_chain_json',
+  ]);
+  const row = data?.find((r: { key: string }) => r.key === 'last_option_chain_json');
+  if (!row?.value) return null;
+  try {
+    const parsed = JSON.parse(row.value);
+    if (parsed?.niftySpot > 0) return parsed;
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
+async function saveCachedOptionChain(supabase: any, payload: Record<string, unknown>) {
+  await supabase.from('bot_settings').upsert(
+    {
+      key: 'last_option_chain_json',
+      value: JSON.stringify({ ...payload, cached_at: new Date().toISOString() }),
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: 'key' },
+  );
+}
+
+function buildOptionChainResponse(
+  niftySpot: number,
+  source: string,
+  body: any,
+  keys?: { otmCEInstrumentKey?: string; otmPEInstrumentKey?: string; specificInstrumentKey?: string },
+) {
+  const strikeDiff = 50;
+  const atmStrike = Math.round(niftySpot / strikeDiff) * strikeDiff;
+  const { otmCEStrike, otmPEStrike, otmCEPrice, otmPEPrice } = estimateOtmPremiums(niftySpot, atmStrike, strikeDiff);
+  const expiry = getNextWeeklyExpiryISO();
+  let specificPrice: number | null = null;
+  if (body.strike && body.optionType) {
+    const dist = Math.abs(body.strike - niftySpot);
+    const baseEstimate = parseFloat(Math.max(5, niftySpot * 0.013 - dist * 0.5).toFixed(2));
+    if (body.entryPrice && body.entrySpot) {
+      const spotChange = niftySpot - body.entrySpot;
+      const delta = body.optionType === 'CE' ? 0.3 : -0.3;
+      specificPrice = parseFloat(Math.max(1, body.entryPrice + spotChange * delta).toFixed(2));
+    } else {
+      specificPrice = baseEstimate;
+    }
+  }
+  return {
+    success: true,
+    niftySpot,
+    atmStrike,
+    otmCEStrike,
+    otmPEStrike,
+    otmCEPrice,
+    otmPEPrice,
+    strikeDiff,
+    specificPrice,
+    expiry: expiry.display,
+    source,
+    otmCEInstrumentKey: keys?.otmCEInstrumentKey || '',
+    otmPEInstrumentKey: keys?.otmPEInstrumentKey || '',
+    specificInstrumentKey: keys?.specificInstrumentKey || '',
+  };
+}
+
 async function getNSESession(): Promise<{ cookies: string; headers: Record<string, string> }> {
   const baseHeaders = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -504,24 +653,6 @@ serve(async (req) => {
           const otmCEStrike = atmStrike + strikeDiff;
           const otmPEStrike = atmStrike - strikeDiff;
 
-          // Calculate nearest weekly expiry (Tuesday since Sep 2025) in YYYY-MM-DD format for Upstox
-          function getNextWeeklyExpiryISO(): { iso: string; display: string } {
-            const now = new Date();
-            const day = now.getDay();
-            let daysUntilTuesday = (2 - day + 7) % 7;
-            if (daysUntilTuesday === 0) {
-              const hours = now.getUTCHours() + 5.5;
-              if (hours >= 15.5) daysUntilTuesday = 7;
-            }
-            const expiry = new Date(now);
-            expiry.setDate(now.getDate() + daysUntilTuesday);
-            const yyyy = expiry.getFullYear();
-            const mm = String(expiry.getMonth() + 1).padStart(2, '0');
-            const dd = String(expiry.getDate()).padStart(2, '0');
-            const mmm = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][expiry.getMonth()];
-            return { iso: `${yyyy}-${mm}-${dd}`, display: `${dd}-${mmm}-${yyyy}` };
-          }
-
           const expiry = getNextWeeklyExpiryISO();
 
           // Fetch option chain from Upstox
@@ -579,12 +710,14 @@ serve(async (req) => {
           // If Upstox returned valid prices, use them. Otherwise fall through to NSE fallback.
           const hasValidPrices = otmCEPrice > 0 || otmPEPrice > 0 || specificPrice !== null;
           if (hasValidPrices) {
-            return new Response(JSON.stringify({
+            const payload = {
               success: true,
               niftySpot, atmStrike, otmCEStrike, otmPEStrike, otmCEPrice, otmPEPrice, strikeDiff,
               specificPrice, expiry: expiry.display, source: 'upstox',
               otmCEInstrumentKey, otmPEInstrumentKey, specificInstrumentKey,
-            }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+            };
+            await saveCachedOptionChain(supabase, payload);
+            return new Response(JSON.stringify(payload), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
           }
           
           // Option chain returned no data - try contract API for instrument keys
@@ -632,12 +765,14 @@ serve(async (req) => {
               if (otmCEInstrumentKey || otmPEInstrumentKey) {
                 // If prices still 0, we'll get them from NSE but keep the keys
                 if (otmCEPrice > 0 || otmPEPrice > 0 || specificPrice !== null) {
-                  return new Response(JSON.stringify({
+                  const payload = {
                     success: true,
                     niftySpot, atmStrike, otmCEStrike, otmPEStrike, otmCEPrice, otmPEPrice, strikeDiff,
                     specificPrice, expiry: expiry.display, source: 'upstox-contract',
                     otmCEInstrumentKey, otmPEInstrumentKey, specificInstrumentKey,
-                  }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+                  };
+                  await saveCachedOptionChain(supabase, payload);
+                  return new Response(JSON.stringify(payload), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
                 }
               }
             } else { await contractRes.text(); }
@@ -660,79 +795,60 @@ serve(async (req) => {
         console.log('No valid Upstox token, using NSE fallback');
       }
 
-      // NSE Fallback (original logic)
-      const { cookies, headers } = await getNSESession();
-
-      const niftyRes = await fetch("https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%2050", { headers });
-      if (!niftyRes.ok) {
-        await niftyRes.text();
-        return new Response(JSON.stringify({ success: false, error: 'Could not fetch Nifty spot' }), {
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        });
-      }
-      const niftyData = await niftyRes.json();
-      const niftyEntry = niftyData?.data?.find((d: any) => d.symbol === "NIFTY 50" || d.index === "NIFTY 50");
-      if (!niftyEntry) {
-        return new Response(JSON.stringify({ success: false, error: 'Nifty spot not found' }), {
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        });
-      }
-
-      const niftySpot = niftyEntry.lastPrice || niftyEntry.last;
-      const strikeDiff = 50;
-      const atmStrike = Math.round(niftySpot / strikeDiff) * strikeDiff;
-      const otmCEStrike = atmStrike + strikeDiff;
-      const otmPEStrike = atmStrike - strikeDiff;
-
-      // Fallback estimation
-      const distCE = Math.abs(otmCEStrike - niftySpot);
-      const otmCEPrice = parseFloat(Math.max(5, niftySpot * 0.013 - distCE * 0.5).toFixed(2));
-      const distPE = Math.abs(otmPEStrike - niftySpot);
-      const otmPEPrice = parseFloat(Math.max(5, niftySpot * 0.013 - distPE * 0.5).toFixed(2));
-
-      function getNextWeeklyExpiry(): string {
-        const now = new Date();
-        const day = now.getDay();
-        let daysUntilTuesday = (2 - day + 7) % 7;
-        if (daysUntilTuesday === 0) {
-          const hours = now.getUTCHours() + 5.5;
-          if (hours >= 15.5) daysUntilTuesday = 7;
-        }
-        const expiry = new Date(now);
-        expiry.setDate(now.getDate() + daysUntilTuesday);
-        const dd = String(expiry.getDate()).padStart(2, '0');
-        const mmm = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][expiry.getMonth()];
-        const yyyy = expiry.getFullYear();
-        return `${dd}-${mmm}-${yyyy}`;
-      }
-
-      console.log(`NSE fallback - CE ${otmCEStrike}: ₹${otmCEPrice}, PE ${otmPEStrike}: ₹${otmPEPrice}`);
-
-      // Estimate specific price for tick monitoring if requested
-      let specificPrice = null;
-      if (body.strike && body.optionType) {
-        const dist = Math.abs(body.strike - niftySpot);
-        const baseEstimate = parseFloat(Math.max(5, niftySpot * 0.013 - dist * 0.5).toFixed(2));
-        if (body.entryPrice && body.entrySpot) {
-          const spotChange = niftySpot - body.entrySpot;
-          const delta = body.optionType === 'CE' ? 0.3 : -0.3;
-          specificPrice = parseFloat(Math.max(1, body.entryPrice + spotChange * delta).toFixed(2));
-        } else {
-          specificPrice = baseEstimate;
+      // NSE fallback (quick session first, then full warmup)
+      let niftySpot = await fetchNiftySpotFromNSE();
+      if (!niftySpot) {
+        try {
+          const { headers } = await getNSESession();
+          const niftyRes = await fetch('https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%2050', { headers });
+          if (niftyRes.ok) {
+            const niftyData = await niftyRes.json();
+            const niftyEntry = niftyData?.data?.find((d: any) => d.symbol === 'NIFTY 50' || d.index === 'NIFTY 50');
+            const spot = niftyEntry?.lastPrice ?? niftyEntry?.last;
+            if (typeof spot === 'number' && spot > 0) niftySpot = spot;
+          } else {
+            await niftyRes.text();
+          }
+        } catch (nseErr) {
+          console.error('NSE full fallback error:', nseErr);
         }
       }
 
-      // Carry over instrument keys from Upstox contract API if available
-      const finalCEKey = (typeof savedCEKey !== 'undefined' && savedCEKey) ? savedCEKey : '';
-      const finalPEKey = (typeof savedPEKey !== 'undefined' && savedPEKey) ? savedPEKey : '';
-      const finalSpecificKey = (typeof savedSpecificKey !== 'undefined' && savedSpecificKey) ? savedSpecificKey : '';
+      if (niftySpot) {
+        const payload = buildOptionChainResponse(niftySpot, savedCEKey ? 'nse-estimate-with-keys' : 'nse-estimate', body, {
+          otmCEInstrumentKey: savedCEKey,
+          otmPEInstrumentKey: savedPEKey,
+          specificInstrumentKey: savedSpecificKey,
+        });
+        console.log(`NSE fallback spot=${niftySpot} CE=${payload.otmCEPrice} PE=${payload.otmPEPrice}`);
+        await saveCachedOptionChain(supabase, payload);
+        return new Response(JSON.stringify(payload), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
 
-      return new Response(JSON.stringify({
-        success: true,
-        niftySpot, atmStrike, otmCEStrike, otmPEStrike, otmCEPrice, otmPEPrice, strikeDiff,
-        specificPrice, expiry: getNextWeeklyExpiry(), source: finalCEKey ? 'nse-estimate-with-keys' : 'nse-estimate',
-        otmCEInstrumentKey: finalCEKey, otmPEInstrumentKey: finalPEKey, specificInstrumentKey: finalSpecificKey,
-      }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      const cached = await loadCachedOptionChain(supabase);
+      if (cached) {
+        console.log(`Using cached option chain from ${(cached as { cached_at?: string }).cached_at}`);
+        const payload = {
+          ...cached,
+          success: true,
+          source: 'cached',
+          specificPrice: cached.specificPrice ?? null,
+        };
+        return new Response(JSON.stringify(payload), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+
+      return new Response(
+        JSON.stringify({
+          success: false,
+          error:
+            'Could not fetch Nifty spot (NSE blocked or market closed). Connect Upstox for live option chain, or retry during market hours 9:15–15:30 IST.',
+        }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
+      );
     }
 
     const botToken = Deno.env.get('TELEGRAM_BOT_TOKEN');

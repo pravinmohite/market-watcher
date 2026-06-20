@@ -43,6 +43,47 @@ const SNIPER_WINDOW_END_MIN = 11 * 60 + 0; // 11:00 IST
 const SNIPER_SESSION_LOSS_CAP_DEFAULT = 1200;
 const SNIPER_DAILY_LOSS_LIMIT_DEFAULT = 3000;
 
+/** Reliable IST clock (avoid `new Date(toLocaleString(...))` — breaks on Deno/UTC servers). */
+function getIstParts(d = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Kolkata',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    weekday: 'short',
+    hour12: false,
+  }).formatToParts(d);
+  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? '0';
+  const y = parseInt(get('year'), 10);
+  const mo = parseInt(get('month'), 10);
+  const dayNum = parseInt(get('day'), 10);
+  const h = parseInt(get('hour'), 10);
+  const mi = parseInt(get('minute'), 10);
+  const wd = get('weekday');
+  const dayMap: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+  const ymd = `${y}-${String(mo).padStart(2, '0')}-${String(dayNum).padStart(2, '0')}`;
+  return { y, mo, d: dayNum, h, mi, day: dayMap[wd] ?? 0, ymd, minutes: h * 60 + mi };
+}
+
+function edgeFnHeaders(anonKey: string) {
+  return {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${anonKey}`,
+    apikey: anonKey,
+  };
+}
+
+async function logSniperAutoStart(supabase: any, msg: string) {
+  const line = `${new Date().toISOString()} ${msg}`;
+  console.log(`[sniper-auto-start] ${line}`);
+  await supabase.from('bot_settings').upsert(
+    { key: 'last_sniper_auto_start_log', value: line.slice(-500), updated_at: new Date().toISOString() },
+    { onConflict: 'key' },
+  );
+}
+
 function parsePositiveFloat(val: unknown, fallback: number): number {
   const n = typeof val === 'string' || typeof val === 'number' ? parseFloat(String(val)) : NaN;
   return !Number.isNaN(n) && n > 0 ? n : fallback;
@@ -191,10 +232,8 @@ function nextWindowHint(strategy: string, timeMin: number): string {
 }
 
 function istTodayUtcStart(): Date {
-  const nowIST = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
-  const todayStart = new Date(nowIST);
-  todayStart.setHours(0, 0, 0, 0);
-  return new Date(todayStart.getTime() - 5.5 * 60 * 60 * 1000);
+  const { ymd } = getIstParts();
+  return new Date(`${ymd}T00:00:00+05:30`);
 }
 
 /** True only if a sniper session exists today (martingale sessions do not block sniper). */
@@ -349,10 +388,8 @@ async function stopSniperBotForDay(supabase: any): Promise<void> {
   );
 }
 
-function isIstMarketDay(nowIST: Date, holidays: string[]): boolean {
-  const day = nowIST.getDay();
-  const ymd = `${nowIST.getFullYear()}-${String(nowIST.getMonth() + 1).padStart(2, '0')}-${String(nowIST.getDate()).padStart(2, '0')}`;
-  return day !== 0 && day !== 6 && !holidays.includes(ymd);
+function isIstMarketDay(nowIST: { day: number; ymd: string }, holidays: string[]): boolean {
+  return nowIST.day !== 0 && nowIST.day !== 6 && !holidays.includes(nowIST.ymd);
 }
 
 const NSE_HOLIDAYS_SCHED: string[] = [
@@ -369,13 +406,17 @@ async function trySniperAutoStartIfNeeded(
   const strategy = await getStrategyMode(supabase);
   if (!isSniperStrategy(strategy)) return null;
 
-  const nowIST = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
-  const tickTime = nowIST.getHours() * 60 + nowIST.getMinutes();
-  if (!isIstMarketDay(nowIST, NSE_HOLIDAYS_SCHED) || !sniperInTradingWindow(tickTime)) return null;
+  const ist = getIstParts();
+  if (!isIstMarketDay(ist, NSE_HOLIDAYS_SCHED) || !sniperInTradingWindow(ist.minutes)) {
+    return null;
+  }
 
   const dailyPnl = await getDailyPnl(supabase);
   const dailyCap = await getSniperDailyLossLimit(supabase);
-  if (dailyPnl <= -dailyCap) return 'Sniper: daily loss cap hit — no auto-start.';
+  if (dailyPnl <= -dailyCap) {
+    await logSniperAutoStart(supabase, 'blocked: daily loss cap');
+    return 'Sniper: daily loss cap hit — no auto-start.';
+  }
 
   await supabase.from('bot_settings').upsert(
     { key: 'bot_running', value: 'true', updated_at: new Date().toISOString() },
@@ -390,23 +431,8 @@ async function trySniperAutoStartIfNeeded(
   if (activeSession) return null;
 
   if (await sniperHasSessionToday(supabase)) {
+    await logSniperAutoStart(supabase, 'skipped: session already used today');
     return 'Sniper: today\'s sniper session already used (martingale sessions earlier do not count).';
-  }
-
-  const { optionData: od } = await fetchNiftyOptionChain(supabaseUrl, anonKey);
-  const sidewaysPause = await isInSidewaysPause(
-    supabase,
-    '',
-    od?.niftySpot ?? 0,
-    supabaseUrl,
-    anonKey,
-    od?.otmCEPrice,
-    od?.otmPEPrice,
-    od?.otmCEStrike,
-    od?.otmPEStrike,
-  );
-  if (sidewaysPause.paused) {
-    return `Sniper auto-start skipped — sideways pause (${sidewaysPause.remainingMins} min).`;
   }
 
   const { data: settings } = await supabase.from('bot_settings').select('key, value');
@@ -417,23 +443,29 @@ async function trySniperAutoStartIfNeeded(
     }
   }
 
+  await logSniperAutoStart(supabase, `attempting start ${ist.ymd} ${ist.h}:${String(ist.mi).padStart(2, '0')} IST mode=${savedMode}`);
+
   const startRes = await fetch(`${supabaseUrl}/functions/v1/martingale-bot`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${anonKey}` },
+    headers: edgeFnHeaders(anonKey),
     body: JSON.stringify({
       action: 'start',
       trading_mode: savedMode,
       max_rounds: SNIPER_MAX_ROUNDS,
       strategy_mode: STRATEGY_SNIPER,
       skip_decay_check: true,
+      source: 'sniper_auto_start',
     }),
   });
   const startData = await startRes.json();
   if (startData.success) {
+    await logSniperAutoStart(supabase, `success: ${startData.message || 'ok'}`);
     await sendTelegram(`⏰ *Sniper Auto-Start*\n${startData.message || 'Session started in 9:35–11:00 window'}`);
     return `Sniper auto-started: ${startData.message || 'ok'}`;
   }
-  return `Sniper auto-start failed: ${startData.message || JSON.stringify(startData)}`;
+  const failMsg = startData.message || JSON.stringify(startData);
+  await logSniperAutoStart(supabase, `failed: ${failMsg}`);
+  return `Sniper auto-start failed: ${failMsg}`;
 }
 
 async function completeSniperSession(
@@ -532,7 +564,31 @@ interface OptionChainData {
   otmPEInstrumentKey?: string;
 }
 
-async function fetchNiftyOptionChain(supabaseUrl: string, anonKey: string, strike?: number, optionType?: string, entrySpot?: number, entryPrice?: number): Promise<{ optionData: OptionChainData | null; specificPrice: number | null; specificInstrumentKey: string | null }> {
+async function loadCachedOptionChainFromSettings(supabase: any): Promise<OptionChainData | null> {
+  const { data } = await supabase.from('bot_settings').select('value').eq('key', 'last_option_chain_json').maybeSingle();
+  if (!data?.value) return null;
+  try {
+    const p = JSON.parse(data.value);
+    if (p?.niftySpot > 0 && p?.otmCEPrice > 0) {
+      return {
+        niftySpot: p.niftySpot,
+        atmStrike: p.atmStrike,
+        otmCEStrike: p.otmCEStrike,
+        otmPEStrike: p.otmPEStrike,
+        otmCEPrice: p.otmCEPrice,
+        otmPEPrice: p.otmPEPrice,
+        strikeDiff: p.strikeDiff ?? 50,
+        source: `${p.source || 'cache'}-cached`,
+        expiry: p.expiry,
+        otmCEInstrumentKey: p.otmCEInstrumentKey,
+        otmPEInstrumentKey: p.otmPEInstrumentKey,
+      };
+    }
+  } catch { /* ignore */ }
+  return null;
+}
+
+async function fetchNiftyOptionChain(supabaseUrl: string, anonKey: string, strike?: number, optionType?: string, entrySpot?: number, entryPrice?: number, supabase?: any): Promise<{ optionData: OptionChainData | null; specificPrice: number | null; specificInstrumentKey: string | null; error?: string }> {
   try {
     const body: any = { action: 'nifty-option-chain' };
     if (strike) body.strike = strike;
@@ -542,12 +598,31 @@ async function fetchNiftyOptionChain(supabaseUrl: string, anonKey: string, strik
 
     const res = await fetch(`${supabaseUrl}/functions/v1/check-stock-alerts`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${anonKey}`, 'apikey': anonKey },
+      headers: edgeFnHeaders(anonKey),
       body: JSON.stringify(body),
     });
-    if (!res.ok) { console.error(`Proxy failed: ${res.status}`); await res.text(); return { optionData: null, specificPrice: null, specificInstrumentKey: null }; }
+    if (!res.ok) {
+      const errText = await res.text();
+      console.error(`Option chain proxy failed: ${res.status} ${errText.substring(0, 300)}`);
+      if (supabase) {
+        const cached = await loadCachedOptionChainFromSettings(supabase);
+        if (cached) {
+          return { optionData: cached, specificPrice: null, specificInstrumentKey: null };
+        }
+      }
+      return { optionData: null, specificPrice: null, specificInstrumentKey: null, error: `HTTP ${res.status}` };
+    }
     const data = await res.json();
-    if (!data.success) { console.error(`Proxy error: ${data.error}`); return { optionData: null, specificPrice: null, specificInstrumentKey: null }; }
+    if (!data.success) {
+      console.error(`Option chain proxy error: ${data.error}`);
+      if (supabase) {
+        const cached = await loadCachedOptionChainFromSettings(supabase);
+        if (cached) {
+          return { optionData: cached, specificPrice: null, specificInstrumentKey: null };
+        }
+      }
+      return { optionData: null, specificPrice: null, specificInstrumentKey: null, error: data.error || 'unknown' };
+    }
     return {
       optionData: {
         niftySpot: data.niftySpot, atmStrike: data.atmStrike, otmCEStrike: data.otmCEStrike, otmPEStrike: data.otmPEStrike,
@@ -558,7 +633,10 @@ async function fetchNiftyOptionChain(supabaseUrl: string, anonKey: string, strik
       specificPrice: data.specificPrice,
       specificInstrumentKey: data.specificInstrumentKey || null,
     };
-  } catch (error) { console.error("Option chain error:", error); return { optionData: null, specificPrice: null, specificInstrumentKey: null }; }
+  } catch (error) {
+    console.error('Option chain error:', error);
+    return { optionData: null, specificPrice: null, specificInstrumentKey: null, error: String(error) };
+  }
 }
 
 /** Minimum closed trades per segment before treating stats as actionable in daily reports */
@@ -3007,10 +3085,8 @@ async function processRequest(req: Request, preParsedBody?: any): Promise<Respon
       let maxRounds = Math.min(Math.max(parseInt(body.max_rounds) || DEFAULT_MAX_ROUNDS, 1), 10);
       if (sniper) maxRounds = SNIPER_MAX_ROUNDS;
 
-      const nowIST_start = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
-      const startHour = nowIST_start.getHours();
-      const startMinute = nowIST_start.getMinutes();
-      const startTime = startHour * 60 + startMinute;
+      const istStart = getIstParts();
+      const startTime = istStart.minutes;
       const mktOpen = 9 * 60 + 15;
       const mktClose = 15 * 60 + 30;
 
@@ -3018,7 +3094,7 @@ async function processRequest(req: Request, preParsedBody?: any): Promise<Respon
         if (!sniperInTradingWindow(startTime)) {
           return new Response(JSON.stringify({
             success: false,
-            message: `Sniper mode: trade only 9:35–11:00 IST. Now ${startHour}:${String(startMinute).padStart(2, '0')} IST.`,
+            message: `Sniper mode: trade only 9:35–11:00 IST. Now ${istStart.h}:${String(istStart.mi).padStart(2, '0')} IST.`,
           }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
         }
         if (await sniperHasSessionToday(supabase)) {
@@ -3028,7 +3104,7 @@ async function processRequest(req: Request, preParsedBody?: any): Promise<Respon
           }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
         }
       } else if (startTime < mktOpen || startTime > mktClose) {
-        return new Response(JSON.stringify({ success: false, message: `Cannot start outside market hours (9:15 AM - 3:30 PM IST). Current time: ${startHour}:${String(startMinute).padStart(2, '0')} IST` }), {
+        return new Response(JSON.stringify({ success: false, message: `Cannot start outside market hours (9:15 AM - 3:30 PM IST). Current time: ${istStart.h}:${String(istStart.mi).padStart(2, '0')} IST` }), {
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         });
       }
@@ -3060,12 +3136,19 @@ async function processRequest(req: Request, preParsedBody?: any): Promise<Respon
         });
       }
 
-      const { optionData } = await fetchNiftyOptionChain(supabaseUrl, anonKey);
-      if (!optionData) {
-        return new Response(JSON.stringify({ success: false, message: 'Could not fetch option chain data' }), {
+      let resolvedChain = (await fetchNiftyOptionChain(supabaseUrl, anonKey, undefined, undefined, undefined, undefined, supabase)).optionData;
+      if (!resolvedChain) {
+        resolvedChain = await loadCachedOptionChainFromSettings(supabase);
+      }
+      if (!resolvedChain) {
+        return new Response(JSON.stringify({
+          success: false,
+          message: 'Could not fetch option chain data. Connect Upstox or retry during 9:15–15:30 IST.',
+        }), {
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         });
       }
+      const optionData = resolvedChain;
 
       // Check for sideways pause before starting (uses chain for spot/strikes on gate recheck)
       if (!skipDecayCheck) {
@@ -3291,11 +3374,9 @@ async function processRequest(req: Request, preParsedBody?: any): Promise<Respon
         { onConflict: 'key' },
       );
 
-      const nowIST_sched = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
-      const schedHour = nowIST_sched.getHours();
-      const schedMinute = nowIST_sched.getMinutes();
-      const schedTime = schedHour * 60 + schedMinute;
-      const schedDay = nowIST_sched.getDay();
+      const istSched = getIstParts();
+      const schedTime = istSched.minutes;
+      const schedDay = istSched.day;
 
       // Year-specific NSE holidays (YYYY-MM-DD format)
       const NSE_HOLIDAYS: string[] = [
@@ -3305,8 +3386,8 @@ async function processRequest(req: Request, preParsedBody?: any): Promise<Respon
         '2026-01-26', '2026-03-03', '2026-03-26', '2026-03-31', '2026-04-03', '2026-04-14', '2026-05-01', '2026-05-28', '2026-06-26', '2026-09-14', '2026-10-02', '2026-10-20', '2026-11-10', '2026-11-24', '2026-12-25',
       ];
 
-      const schedYMD = `${nowIST_sched.getFullYear()}-${String(nowIST_sched.getMonth() + 1).padStart(2, '0')}-${String(nowIST_sched.getDate()).padStart(2, '0')}`;
-      const isMarketDay = schedDay !== 0 && schedDay !== 6 && !NSE_HOLIDAYS.includes(schedYMD);
+      const schedYMD = istSched.ymd;
+      const isMarketDay = isIstMarketDay(istSched, NSE_HOLIDAYS);
       const isExpiryDay = schedDay === 2;
 
       const schedStrategy = await getStrategyMode(supabase);
@@ -3375,7 +3456,7 @@ async function processRequest(req: Request, preParsedBody?: any): Promise<Respon
             }
             const startRes = await fetch(`${supabaseUrl}/functions/v1/martingale-bot`, {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${anonKey}` },
+              headers: edgeFnHeaders(anonKey),
               body: JSON.stringify({
                 action: 'start',
                 trading_mode: savedMode,
@@ -3397,7 +3478,7 @@ async function processRequest(req: Request, preParsedBody?: any): Promise<Respon
           if (existingSession) {
             const stopRes = await fetch(`${supabaseUrl}/functions/v1/martingale-bot`, {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${anonKey}` },
+              headers: edgeFnHeaders(anonKey),
               body: JSON.stringify({ action: 'stop' }),
             });
             const stopData = await stopRes.json();
@@ -3412,7 +3493,7 @@ async function processRequest(req: Request, preParsedBody?: any): Promise<Respon
         if (existingSession) {
           const stopRes = await fetch(`${supabaseUrl}/functions/v1/martingale-bot`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${anonKey}` },
+            headers: edgeFnHeaders(anonKey),
             body: JSON.stringify({ action: 'stop', keep_running: true }),
           });
           const stopData = await stopRes.json();
@@ -3629,7 +3710,7 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
       }
       const startRes = await fetch(`${supabaseUrl}/functions/v1/martingale-bot`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${anonKey}` },
+        headers: edgeFnHeaders(anonKey),
         body: JSON.stringify({
           action: 'start',
           trading_mode: savedMode,
@@ -3814,7 +3895,7 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
           if (resumeSniper) savedMaxRounds = SNIPER_MAX_ROUNDS;
           const startRes = await fetch(`${supabaseUrl}/functions/v1/martingale-bot`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${anonKey}` },
+            headers: edgeFnHeaders(anonKey),
             body: JSON.stringify({
               action: 'start',
               trading_mode: savedMode,
@@ -3866,7 +3947,7 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
             if (autoSniper) savedMaxRounds = SNIPER_MAX_ROUNDS;
             const startRes = await fetch(`${supabaseUrl}/functions/v1/martingale-bot`, {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${anonKey}` },
+              headers: edgeFnHeaders(anonKey),
               body: JSON.stringify({
                 action: 'start',
                 trading_mode: savedMode,
