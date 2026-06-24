@@ -140,6 +140,35 @@ async function saveCachedOptionChain(supabase: any, payload: Record<string, unkn
   );
 }
 
+async function getUpstoxMarketToken(supabase: any): Promise<{ token: string; kind: 'access' | 'extended' } | null> {
+  const { data: rows, error } = await supabase
+    .from('upstox_tokens')
+    .select('access_token, extended_token, expires_at, created_at')
+    .order('created_at', { ascending: false })
+    .limit(10);
+
+  if (error) {
+    console.error('Upstox token lookup failed:', error);
+    return null;
+  }
+
+  const nowMs = Date.now();
+  for (const row of rows || []) {
+    const expiryMs = row.expires_at ? Date.parse(row.expires_at) : 0;
+    if (row.access_token && expiryMs > nowMs) {
+      return { token: row.access_token, kind: 'access' };
+    }
+  }
+
+  for (const row of rows || []) {
+    if (row.extended_token) {
+      return { token: row.extended_token, kind: 'extended' };
+    }
+  }
+
+  return null;
+}
+
 function buildOptionChainResponse(
   niftySpot: number,
   source: string,
@@ -609,26 +638,16 @@ serve(async (req) => {
       let savedPEKey = '';
       let savedSpecificKey = '';
 
-      // Try Upstox API first if we have a valid token
-      const { data: upstoxToken } = await supabase
-        .from('upstox_tokens')
-        .select('access_token, extended_token')
-        .gt('expires_at', new Date().toISOString())
-        .order('created_at', { ascending: false })
-        .limit(1)
-        .maybeSingle();
+      // Try Upstox API first. If the daily access token expired at 3:30 AM IST,
+      // use the saved long-lived market-data token instead of falling back to NSE.
+      const upstoxMarketToken = await getUpstoxMarketToken(supabase);
 
-      const upstoxBearer =
-        upstoxToken?.access_token ||
-        (upstoxToken as { extended_token?: string } | null)?.extended_token ||
-        null;
-
-      if (upstoxBearer) {
+      if (upstoxMarketToken?.token) {
         try {
-          console.log('Using Upstox API for option chain data');
+          console.log(`Using Upstox ${upstoxMarketToken.kind} token for option chain data`);
           const upstoxHeaders = {
             'Accept': 'application/json',
-            'Authorization': `Bearer ${upstoxBearer}`,
+            'Authorization': `Bearer ${upstoxMarketToken.token}`,
           };
 
           // Get Nifty spot price from Upstox market quotes
@@ -713,7 +732,7 @@ serve(async (req) => {
             const payload = {
               success: true,
               niftySpot, atmStrike, otmCEStrike, otmPEStrike, otmCEPrice, otmPEPrice, strikeDiff,
-              specificPrice, expiry: expiry.display, source: 'upstox',
+              specificPrice, expiry: expiry.display, source: upstoxMarketToken.kind === 'extended' ? 'upstox-extended' : 'upstox',
               otmCEInstrumentKey, otmPEInstrumentKey, specificInstrumentKey,
             };
             await saveCachedOptionChain(supabase, payload);
@@ -768,7 +787,9 @@ serve(async (req) => {
                   const payload = {
                     success: true,
                     niftySpot, atmStrike, otmCEStrike, otmPEStrike, otmCEPrice, otmPEPrice, strikeDiff,
-                    specificPrice, expiry: expiry.display, source: 'upstox-contract',
+                    specificPrice,
+                    expiry: expiry.display,
+                    source: upstoxMarketToken.kind === 'extended' ? 'upstox-extended-contract' : 'upstox-contract',
                     otmCEInstrumentKey, otmPEInstrumentKey, specificInstrumentKey,
                   };
                   await saveCachedOptionChain(supabase, payload);
