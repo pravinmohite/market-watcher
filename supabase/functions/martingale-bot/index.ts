@@ -78,10 +78,16 @@ function edgeFnHeaders(anonKey: string) {
 async function logSniperAutoStart(supabase: any, msg: string) {
   const line = `${new Date().toISOString()} ${msg}`;
   console.log(`[sniper-auto-start] ${line}`);
-  await supabase.from('bot_settings').upsert(
-    { key: 'last_sniper_auto_start_log', value: line.slice(-500), updated_at: new Date().toISOString() },
-    { onConflict: 'key' },
-  );
+  await Promise.all([
+    supabase.from('bot_settings').upsert(
+      { key: 'last_sniper_auto_start_log', value: line.slice(-500), updated_at: new Date().toISOString() },
+      { onConflict: 'key' },
+    ),
+    supabase.from('bot_settings').upsert(
+      { key: 'last_sniper_cron_decision', value: line.slice(-500), updated_at: new Date().toISOString() },
+      { onConflict: 'key' },
+    ),
+  ]);
 }
 
 function parsePositiveFloat(val: unknown, fallback: number): number {
@@ -404,10 +410,17 @@ async function trySniperAutoStartIfNeeded(
   anonKey: string,
 ): Promise<string | null> {
   const strategy = await getStrategyMode(supabase);
-  if (!isSniperStrategy(strategy)) return null;
+  if (!isSniperStrategy(strategy)) {
+    await logSniperAutoStart(supabase, `skipped: strategy_mode=${strategy}, expected=sniper`);
+    return null;
+  }
 
   const ist = getIstParts();
   if (!isIstMarketDay(ist, NSE_HOLIDAYS_SCHED) || !sniperInTradingWindow(ist.minutes)) {
+    await logSniperAutoStart(
+      supabase,
+      `skipped: outside sniper window/market day ymd=${ist.ymd} day=${ist.day} time=${ist.h}:${String(ist.mi).padStart(2, '0')} IST`,
+    );
     return null;
   }
 
@@ -428,7 +441,10 @@ async function trySniperAutoStartIfNeeded(
     .select('id')
     .eq('status', 'active')
     .maybeSingle();
-  if (activeSession) return null;
+  if (activeSession) {
+    await logSniperAutoStart(supabase, `skipped: active session already running ${activeSession.id}`);
+    return null;
+  }
 
   if (await sniperHasSessionToday(supabase)) {
     await logSniperAutoStart(supabase, 'skipped: session already used today');
