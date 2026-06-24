@@ -447,6 +447,7 @@ export type Database = {
     }
     Functions: {
       get_sniper_cron_health: { Args: never; Returns: Json }
+      invoke_martingale_general_cron_tick: { Args: never; Returns: undefined }
       invoke_martingale_sniper_cron_tick: { Args: never; Returns: undefined }
     }
     Enums: {
