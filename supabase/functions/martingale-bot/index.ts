@@ -416,7 +416,13 @@ async function trySniperAutoStartIfNeeded(
   }
 
   const ist = getIstParts();
-  if (!isIstMarketDay(ist, NSE_HOLIDAYS_SCHED) || !sniperInTradingWindow(ist.minutes)) {
+  const isMarketDay = isIstMarketDay(ist, NSE_HOLIDAYS_SCHED);
+  if (isMarketDay && ist.minutes >= SNIPER_WINDOW_START_MIN - 2 && ist.minutes < SNIPER_WINDOW_START_MIN) {
+    await fetchNiftyOptionChain(supabaseUrl, anonKey, undefined, undefined, undefined, undefined, supabase);
+    await logSniperAutoStart(supabase, `prewarm: option chain before 9:35 window ${ist.h}:${String(ist.mi).padStart(2, '0')} IST`);
+    return 'Sniper: pre-warmed option chain cache before 9:35 window.';
+  }
+  if (!isMarketDay || !sniperInTradingWindow(ist.minutes)) {
     await logSniperAutoStart(
       supabase,
       `skipped: outside sniper window/market day ymd=${ist.ymd} day=${ist.day} time=${ist.h}:${String(ist.mi).padStart(2, '0')} IST`,
@@ -430,11 +436,6 @@ async function trySniperAutoStartIfNeeded(
     await logSniperAutoStart(supabase, 'blocked: daily loss cap');
     return 'Sniper: daily loss cap hit — no auto-start.';
   }
-
-  await supabase.from('bot_settings').upsert(
-    { key: 'bot_running', value: 'true', updated_at: new Date().toISOString() },
-    { onConflict: 'key' },
-  );
 
   const { data: activeSession } = await supabase
     .from('martingale_sessions')
@@ -475,11 +476,16 @@ async function trySniperAutoStartIfNeeded(
   });
   const startData = await startRes.json();
   if (startData.success) {
+    await supabase.from('bot_settings').upsert(
+      { key: 'bot_running', value: 'true', updated_at: new Date().toISOString() },
+      { onConflict: 'key' },
+    );
     await logSniperAutoStart(supabase, `success: ${startData.message || 'ok'}`);
     await sendTelegram(`⏰ *Sniper Auto-Start*\n${startData.message || 'Session started in 9:35–11:00 window'}`);
     return `Sniper auto-started: ${startData.message || 'ok'}`;
   }
   const failMsg = startData.message || JSON.stringify(startData);
+  await stopSniperBotForDay(supabase);
   await logSniperAutoStart(supabase, `failed: ${failMsg}`);
   return `Sniper auto-start failed: ${failMsg}`;
 }
@@ -533,10 +539,7 @@ type SidewaysGateEval = {
 
 
 async function getDailyPnl(supabase: any): Promise<number> {
-  const nowIST = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
-  const todayStart = new Date(nowIST);
-  todayStart.setHours(0, 0, 0, 0);
-  const todayUTC = new Date(todayStart.getTime() - (5.5 * 60 * 60 * 1000));
+  const todayUTC = istTodayUtcStart();
 
   const { data: todaySessions } = await supabase
     .from('martingale_sessions')
@@ -3580,9 +3583,9 @@ serve(async (req) => {
 
 // Single tick logic
 async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string, source: string): Promise<any> {
-    const nowIST_tick = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
-    const tickDay = nowIST_tick.getDay();
-    const tickYMD = `${nowIST_tick.getFullYear()}-${String(nowIST_tick.getMonth() + 1).padStart(2, '0')}-${String(nowIST_tick.getDate()).padStart(2, '0')}`;
+    const tickIst = getIstParts();
+    const tickDay = tickIst.day;
+    const tickYMD = tickIst.ymd;
 
     // NSE holidays - must match the list in auto-schedule
     const NSE_HOLIDAYS_TICK: string[] = [
@@ -3590,7 +3593,7 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
       '2026-01-26', '2026-03-03', '2026-03-26', '2026-03-31', '2026-04-03', '2026-04-14', '2026-05-01', '2026-05-28', '2026-06-26', '2026-09-14', '2026-10-02', '2026-10-20', '2026-11-10', '2026-11-24', '2026-12-25',
     ];
 
-    const isMarketDayTick = tickDay !== 0 && tickDay !== 6 && !NSE_HOLIDAYS_TICK.includes(tickYMD);
+    const isMarketDayTick = isIstMarketDay(tickIst, NSE_HOLIDAYS_TICK);
 
     if (!isMarketDayTick) {
       return { action: `⛔ Market closed today (${tickYMD}, day=${tickDay}). Skipping tick.` };
@@ -3598,13 +3601,13 @@ async function runSingleTick(supabase: any, supabaseUrl: string, anonKey: string
 
     await haltMartingaleSessionsForSniperMode(supabase, supabaseUrl, anonKey);
 
-    const tickHour = nowIST_tick.getHours();
-    const tickMinute = nowIST_tick.getMinutes();
-    const tickTime = tickHour * 60 + tickMinute;
+    const tickHour = tickIst.h;
+    const tickMinute = tickIst.mi;
+    const tickTime = tickIst.minutes;
     const tickStrategyMode = await getStrategyMode(supabase);
     const tickSniper = isSniperStrategy(tickStrategyMode);
 
-    if (tickSniper) {
+    if (tickSniper && source !== 'cron' && source !== 'pg_cron') {
       const sniperAutoMsg = await trySniperAutoStartIfNeeded(supabase, supabaseUrl, anonKey);
       if (sniperAutoMsg?.startsWith('Sniper auto-started:')) {
         return { success: true, action: sniperAutoMsg };
